@@ -269,7 +269,7 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'NuPlanViDARDatasetV1'
-data_split = 'private-test'
+data_split = 'private_test_wm'
 data_root = f'data/openscene-v1.1/sensor_blobs/{data_split}'
 # Ignore the train_ann_pickle_root for submission.
 train_ann_pickle_root = f'data/openscene-v1.1/openscene_{data_split}_train.pkl'

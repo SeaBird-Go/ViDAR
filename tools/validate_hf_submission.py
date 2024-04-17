@@ -2,6 +2,8 @@ import mmcv
 import os, sys
 import tqdm
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
+
 from projects.mmdet3d_plugin.datasets.pipelines.nuplan_loading import PointCloud
 
 dt_path = sys.argv[1]
