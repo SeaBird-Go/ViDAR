@@ -203,7 +203,10 @@ class NuPlanViDARDatasetV1(NuPlanViDARDatasetTemplate):
             # only load the occupancy in future queue.
             if 'occ_gts' in future_queue[-1]:
                 occ_gt_list = [each['occ_gts'] for each in future_queue] 
-                ret_queue['occ_gts'] = DC(occ_gt_list, cpu_only=False)
+                ret_queue['target_occs'] = DC(occ_gt_list, cpu_only=False)
+
+                input_occs_list = [each['occ_gts'] for each in previous_queue] 
+                ret_queue['input_occs'] = DC(input_occs_list, cpu_only=False)
             if 'flow_gts' in future_queue[-1]:
                 flow_gt_list = [each['flow_gts'] for each in future_queue] 
                 ret_queue['flow_gts'] = DC(flow_gt_list, cpu_only=False)

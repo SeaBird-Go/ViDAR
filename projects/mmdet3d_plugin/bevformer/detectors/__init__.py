@@ -4,3 +4,4 @@ from .bevformerV2 import BEVFormerV2
 
 from .vidar import ViDAR
 from .vidar_eval import ViDAREval
+from .vidar_xworld import ViDARXWorld
