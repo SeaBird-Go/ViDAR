@@ -26,7 +26,7 @@ class ViDARHeadV1(ViDARHeadBase):
                  pred_history_frame_num=0,
                  pred_future_frame_num=0,
                  per_frame_loss_weight=(1.0,),
-
+                 use_occ_eval=False,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
@@ -35,6 +35,7 @@ class ViDARHeadV1(ViDARHeadBase):
 
         self.pred_history_frame_num = pred_history_frame_num
         self.pred_future_frame_num = pred_future_frame_num
+        self.use_occ_eval = use_occ_eval
 
         self.pred_frame_num = 1 + self.pred_history_frame_num + self.pred_future_frame_num
         self.per_frame_loss_weight = per_frame_loss_weight
@@ -230,8 +231,9 @@ class ViDARHeadV1(ViDARHeadBase):
                                    batched_origin_points=None):
         """"Generate point cloud prediction.
         """
-        # pred_frame_num, inter_num, num_frame, bs, bev_h * bev_w, num_height_pred
-        pred_dict['next_bev_preds'] = pred_dict['next_bev_preds'][:, :, self.pred_history_frame_num, ...].contiguous()
+        if not self.use_occ_eval:
+            # pred_frame_num, inter_num, num_frame, bs, bev_h * bev_w, num_height_pred
+            pred_dict['next_bev_preds'] = pred_dict['next_bev_preds'][:, :, self.pred_history_frame_num, ...].contiguous()
 
         valid_frames = np.array(pred_dict['valid_frames'])
         valid_gt_points, cur_origin_points = self._get_reference_gt_points(
@@ -239,6 +241,34 @@ class ViDARHeadV1(ViDARHeadBase):
             src_frame_idx_list=valid_frames + self.history_queue_length,
             tgt_frame_idx_list=valid_frames + self.history_queue_length,
             img_metas=img_metas)
+
+        DEBUG = False
+        if DEBUG:
+            from .vis_utils import occ_to_voxel, voxel2points
+            occ_preds = pred_dict['next_bev_preds']  # (bs, pred_frame_num, 200, 200, 16)
+
+            cur_gt_points = valid_gt_points[0]
+            _occ_preds = occ_preds[0]
+            for idx in range(_occ_preds.shape[0]):
+                occ_pred = _occ_preds[idx]
+                print(occ_pred.unique())
+                pts, label = voxel2points(occ_pred, ignore_labels=[11])
+                np.savetxt(f'results/pts_{idx}_occ.xyz', pts.cpu().numpy())
+
+                chosen_idx = (cur_gt_points[:, -1] == idx)
+                curr_pts = cur_gt_points[chosen_idx][:, :3]
+                np.savetxt(f'results/pts_{idx}_gt.xyz', curr_pts.cpu().numpy())
+
+        if self.use_occ_eval:
+            return super().get_point_cloud_prediction_from_occ(
+                pred_dict=pred_dict,
+                gt_points=valid_gt_points,
+                start_idx=start_idx,
+                tgt_bev_h=tgt_bev_h,
+                tgt_bev_w=tgt_bev_w,
+                tgt_pc_range=tgt_pc_range,
+                img_metas=img_metas,
+                batched_origin_points=cur_origin_points)
         return super().get_point_cloud_prediction(
             pred_dict=pred_dict,
             gt_points=valid_gt_points,

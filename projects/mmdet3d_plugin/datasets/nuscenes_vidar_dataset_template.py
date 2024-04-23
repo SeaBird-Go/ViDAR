@@ -21,7 +21,7 @@ class NuScenesViDARDatasetTemplate(CustomNuScenesDataset):
                  ego_mask=None,
                  load_frame_interval=None,
                  rand_frame_interval=(1,),
-
+                 use_occ_gts=False,
                  *args,
                  **kwargs):
         """
@@ -39,6 +39,7 @@ class NuScenesViDARDatasetTemplate(CustomNuScenesDataset):
         self.ego_mask = ego_mask
         self.load_frame_interval = load_frame_interval
         self.rand_frame_interval = rand_frame_interval
+        self.use_occ_gts = use_occ_gts
 
         # Remove data_infos without enough history & future.
         # if test, assert all history frames are available

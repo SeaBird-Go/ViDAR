@@ -198,6 +198,16 @@ class NuPlanViDARDatasetV1(NuPlanViDARDatasetTemplate):
         ret_queue.pop('points')
         ret_queue['gt_points'] = DC(
             torch.from_numpy(np.concatenate(total_pts_list, 0)), cpu_only=False)
+        
+        if self.use_occ_gts:
+            # only load the occupancy in future queue.
+            if 'occ_gts' in future_queue[-1]:
+                occ_gt_list = [each['occ_gts'] for each in future_queue] 
+                ret_queue['occ_gts'] = DC(occ_gt_list, cpu_only=False)
+            if 'flow_gts' in future_queue[-1]:
+                flow_gt_list = [each['flow_gts'] for each in future_queue] 
+                ret_queue['flow_gts'] = DC(flow_gt_list, cpu_only=False)
+
         if len(future_can_bus) < 1 + self.future_length:
             return None
         return ret_queue

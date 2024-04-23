@@ -70,6 +70,7 @@ class NuPlanViDARDatasetTemplate(NuScenesViDARDatasetTemplate):
             can_bus=info['can_bus'],
             frame_idx=info['frame_idx'],
             timestamp=info['timestamp'] / 1e6,
+            occ_gt_path=info['occ_gt_final_path'],  # is already absolute path
         )
 
         image_paths = []

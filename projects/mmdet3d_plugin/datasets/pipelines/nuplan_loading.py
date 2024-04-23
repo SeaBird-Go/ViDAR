@@ -8,6 +8,9 @@ from mmdet3d.datasets.pipelines import VoxelBasedPointSampler
 
 from io import BytesIO
 from typing import IO, Any, List, NamedTuple
+import torch
+
+
 class PointCloudHeader(NamedTuple):
     """Class for Point Cloud header."""
 
@@ -286,4 +289,16 @@ class LoadNuPlanPointsFromMultiSweeps(LoadPointsFromMultiSweeps):
             points = results['points']
             points.tensor[:, -1] = self.hard_sweeps_timestamp
             results['points'] = points
+        return results
+    
+
+@PIPELINES.register_module()
+class LoadOccupancyGT(object):
+    def __init__(self):
+        pass
+
+    def __call__(self, results):
+        occ_gt_path = results['occ_gt_path']
+        occ_gts = np.load(occ_gt_path)  # (n, 2)
+        results['occ_gts'] = torch.from_numpy(occ_gts)
         return results

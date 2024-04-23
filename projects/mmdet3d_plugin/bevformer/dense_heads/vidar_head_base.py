@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-
+from einops import rearrange
 from mmcv.cnn import Linear, bias_init_with_prob
 from mmcv.cnn import xavier_init, constant_init
 from mmdet.models import HEADS, build_loss
@@ -751,6 +751,101 @@ class ViDARHeadBase(ViDARHeadTemplate):
         )
         return decode_dict
 
+    @force_fp32(apply_to=('pred_dict'))
+    def get_point_cloud_prediction_from_occ(self,
+                                            pred_dict,
+                                            gt_points,
+                                            start_idx,
+                                            tgt_bev_h,
+                                            tgt_bev_w,
+                                            tgt_pc_range,
+                                            img_metas=None,
+                                            batched_origin_points=None):
+        """ Rewrite the function of get_point_cloud_prediction.
+
+        After finding the path, we use softmax + max_index to find the index with largest
+            probability. And use its distance as the final results.
+        """
+        # Pre-process predicted results.
+        occ_preds = pred_dict['next_bev_preds']  # (bs, pred_frame_num, 200, 200, 16)
+        valid_frames = pred_dict['valid_frames']
+        # pred_frame_num, inter_num, bs, token_num, num_height_pred = bev_preds.shape
+        bs, pred_frame_num, _, _, num_height_pred = occ_preds.shape
+         
+        density_prob = rearrange(occ_preds, 'b f x y z -> b f z y x').contiguous().to(torch.float32)
+        sigma = density_prob != 11
+        sigma = sigma.float()
+        sigma[sigma == 0] = -10
+        sigma[sigma == 1] = 10
+
+        # a dummy variable for self._process_gt_points function
+        bev_preds = torch.zeros((pred_frame_num, 1, bs, 40000, num_height_pred), dtype=torch.float32).to(occ_preds.device)
+        # Pre-process groundtruth.
+        (batched_origin_grids, batched_origin_points,
+         batched_gt_grids, batched_gt_points,
+         batched_gt_tindex) = self._process_gt_points(
+            bev_preds, gt_points, batched_origin_points,
+            valid_frames, start_idx, pred_frame_num,
+            tgt_bev_h, tgt_bev_w, tgt_pc_range
+        )
+
+        gt_dist = batched_gt_grids.new_zeros(*batched_gt_grids.shape[:2])
+        pred_dist = torch.zeros_like(gt_dist)
+        r_grids = torch.from_numpy(np.arange(0, self.ray_grid_num) + 0.5).to(
+            batched_gt_grids.dtype).to(batched_gt_grids.device) * self.ray_grid_step
+        for bs_idx in range(bs):
+            for frame_idx in range(pred_frame_num):
+                cur_origin_grids = batched_origin_grids[bs_idx, frame_idx:frame_idx + 1]  # 1, 3
+                cur_tindex = batched_gt_tindex[bs_idx]  # -1
+
+                # Parse ground-truth.
+                cur_gt_grids = batched_gt_grids[bs_idx][cur_tindex == frame_idx]  # -1, 3
+                if len(cur_gt_grids) == 0: continue
+                gt_dist[bs_idx, cur_tindex == frame_idx] = torch.sqrt(((cur_gt_grids - cur_origin_grids) ** 2).sum(-1))
+
+                # Parse predictions.
+                cur_r = cur_gt_grids - cur_origin_grids  # -1, 3
+                cur_r_norm = cur_r / torch.sqrt((cur_r ** 2).sum(-1, keepdims=True))  # -1, 3
+
+                cur_r_grids = (cur_origin_grids.view(-1, 1, 3) +
+                               cur_r_norm.view(-1, 1, 3) * r_grids.view(1, -1, 1))
+                cur_r_length = torch.sqrt(((cur_r_grids - cur_origin_grids.view(-1, 1, 3)) ** 2).sum(-1))
+
+                cur_r_grids[..., 0] = cur_r_grids[..., 0] / tgt_bev_w
+                cur_r_grids[..., 1] = cur_r_grids[..., 1] / tgt_bev_h
+                cur_r_grids[..., 2] = cur_r_grids[..., 2] / num_height_pred
+                cur_r_grids = cur_r_grids * 2 - 1  # points_num, grids_num, 3
+
+                cur_sigma = sigma[bs_idx, frame_idx]  # num_height, bev_h, bev_w
+                cur_sigma = F.grid_sample(cur_sigma.view(1, 1, *cur_sigma.shape),
+                                          cur_r_grids.view(1, 1, *cur_r_grids.shape),
+                                          mode='nearest')
+                cur_sigma = cur_sigma.float().masked_fill((cur_sigma == 0), -10)
+
+                cur_sigma = cur_sigma.squeeze(0).squeeze(0).squeeze(0)  # points_num, grids_num
+                _, max_sigma_idx = cur_sigma.max(1)  # points_num
+                cur_dist = torch.gather(cur_r_length, dim=1, index=max_sigma_idx.view(-1, 1)).squeeze(-1)
+
+                pred_dist[bs_idx, cur_tindex == frame_idx] = cur_dist
+
+        scale_factor = (tgt_pc_range[3] - tgt_pc_range[0]) / tgt_bev_w
+        pred_dist = pred_dist * scale_factor
+        gt_dist = gt_dist * scale_factor
+        # 2. render pred_point_cloud and gt_point_cloud.
+        pred_pcds = self.get_rendered_pcds(
+            batched_origin_points, batched_gt_points, batched_gt_tindex,
+            gt_dist, pred_dist, tgt_pc_range)
+        gt_pcds = self.get_rendered_pcds(
+            batched_origin_points, batched_gt_points, batched_gt_tindex,
+            gt_dist, gt_dist, tgt_pc_range)
+
+        decode_dict = dict(
+            pred_pcds=pred_pcds,
+            gt_pcds=gt_pcds,
+            origin=batched_origin_points,
+        )
+        return decode_dict
+    
     def _custom_gumbel_softmax_distance(self, grid_embed, grid_length):
         """ Decode differentiable distance from grid_embed and grid_length. """
         # 1. randomly sample the current ground-truth according to gumbel_sample.
