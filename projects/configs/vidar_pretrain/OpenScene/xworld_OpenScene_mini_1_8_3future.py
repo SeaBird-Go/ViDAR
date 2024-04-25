@@ -19,8 +19,8 @@ point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.2, 0.2, 8]
 
 # Dataloader.
-future_queue_length_train = 3
-future_pred_frame_num_train = 3
+future_queue_length_train = 6
+future_pred_frame_num_train = 6
 rand_frame_interval = (1,)
 future_queue_length_test = 6
 future_pred_frame_num_test = 6
@@ -30,6 +30,8 @@ frame_loss_weight = [
     [1],  # for frame 1.
     [1],  # for frame 2.
     [1],  # for frame 3.
+    [1],  # for frame 4.
+    [1],  # for frame 5.
     [0]  # ignore.
 ]
 supervise_all_future = True  # set to False for saving GPU memory.
@@ -66,12 +68,13 @@ _ffn_dim_ = _dim_*2
 _num_levels_ = 4
 bev_h_ = 200
 bev_w_ = 200
-queue_length = 4 # each sequence contains `queue_length` frames.
+queue_length = 5 # each sequence contains `queue_length` frames.
 
 
 expansion = 8
 model = dict(
     type='ViDARXWorld',
+    history_len=queue_length + 1,
     use_grid_mask=True,
     video_test_mode=True,
     supervise_all_future=supervise_all_future,
@@ -93,7 +96,7 @@ model = dict(
         n_decoder_layers=6,
         heads=8,
         history_len=queue_length + 1,
-        future_len=4,
+        future_len=future_queue_length_train,
 
         history_queue_length=queue_length,
         pred_history_frame_num=vidar_head_pred_history_frame_num,
@@ -167,11 +170,11 @@ model = dict(
             iou_cost=dict(type='IoUCost', weight=0.0), # Fake cost. This is just to make it compatible with DETR head.
             pc_range=point_cloud_range))))
 
-dataset_type = 'NuPlanViDARDatasetV1'
+dataset_type = 'NuPlanXWorldDataset'
 data_split = 'mini'
 data_root = f'data/openscene-v1.1/sensor_blobs/{data_split}'
 train_ann_pickle_root = f'data/openscene-v1.1/openscene_{data_split}_train_v2.pkl'
-val_ann_pickle_root = f'data/openscene-v1.1/openscene_{data_split}_val.pkl'
+val_ann_pickle_root = f'data/openscene-v1.1/openscene_{data_split}_val_v2.pkl'
 file_client_args = dict(backend='disk')
 
 train_pipeline = [
@@ -200,26 +203,17 @@ train_pipeline = [
         time_dim=4,
     ),
 
-    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
-    dict(type='PhotoMetricDistortionMultiViewImage'),
-
-    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-    dict(type='RandomScaleImageMultiViewImage', scales=[2 / 3]),
-    dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
-    dict(type='CustomCollect3D', keys=['img', 'points', 'aug_param',
+    dict(type='CustomCollect3D', keys=['points', 'aug_param',
                                        'occ_gts'])
 ]
 
 test_pipeline = [
     dict(type='LoadNuPlanPointsFromFile',
          coord_type='LIDAR',),
-    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
-    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-    dict(type='RandomScaleImageMultiViewImage', scales=[2 / 3]),
-    dict(type='PadMultiViewImage', size_divisor=32),
+    dict(type='LoadOccupancyGT'),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
-    dict(type='CustomCollect3D', keys=['img', 'points',
+    dict(type='CustomCollect3D', keys=['points',
                                        'occ_gts'])
 ]
 
@@ -234,6 +228,7 @@ data = dict(
         classes=class_names,
         modality=input_modality,
         test_mode=False,
+        use_img=False,
         use_occ_gts=True,
         use_valid_flag=True,
         bev_size=(bev_h_, bev_w_),
@@ -248,6 +243,7 @@ data = dict(
     val=dict(type=dataset_type,
              data_root=data_root,
              ann_file=val_ann_pickle_root,
+             use_img=False,
              use_occ_gts=True,
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1,
@@ -262,6 +258,7 @@ data = dict(
               ann_file=val_ann_pickle_root,
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality,
+              use_img=False,
               use_occ_gts=True,
               # some evaluation configuration.
               queue_length=queue_length,
@@ -274,11 +271,7 @@ data = dict(
 
 optimizer = dict(
     type='AdamW',
-    lr=2e-4,
-    paramwise_cfg=dict(
-        custom_keys={
-            'img_backbone': dict(lr_mult=0.1),  # 0.1 in pre-train.
-        }),
+    lr=1e-3,
     weight_decay=0.01)
 
 optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
@@ -289,16 +282,15 @@ lr_config = dict(
     warmup_iters=500,
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
-total_epochs = 24
-evaluation = dict(interval=24, pipeline=test_pipeline)
+total_epochs = 48
+evaluation = dict(interval=total_epochs, pipeline=test_pipeline)
 
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
-load_from = 'pretrained/r101_dcn_fcos3d_pretrain.pth'
 log_config = dict(
-    interval=5,
+    interval=50,
     hooks=[
         dict(type='TextLoggerHook'),
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=1, max_keep_ckpts=1)
+checkpoint_config = dict(interval=1, max_keep_ckpts=5)

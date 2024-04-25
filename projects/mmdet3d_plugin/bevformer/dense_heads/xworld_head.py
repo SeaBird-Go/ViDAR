@@ -231,8 +231,8 @@ class XWorldHead(ViDARHeadBase):
         """
         bev_preds = pred_dict['next_bev_preds']
         valid_frames = np.array(pred_dict['valid_frames'])
-        start_frames = (valid_frames + self.history_queue_length - self.pred_history_frame_num)
-        tgt_frames = valid_frames + self.history_queue_length
+        start_frames = (valid_frames + self.history_queue_length + 1 - self.pred_history_frame_num)
+        tgt_frames = valid_frames + self.history_queue_length + 1
 
         full_prev_bev_exists = pred_dict.get('full_prev_bev_exists', True)
         if not full_prev_bev_exists:
@@ -302,8 +302,8 @@ class XWorldHead(ViDARHeadBase):
         valid_frames = np.array(pred_dict['valid_frames'])
         valid_gt_points, cur_origin_points = self._get_reference_gt_points(
             gt_points,
-            src_frame_idx_list=valid_frames + self.history_queue_length,
-            tgt_frame_idx_list=valid_frames + self.history_queue_length,
+            src_frame_idx_list=valid_frames + self.history_queue_length + 1,
+            tgt_frame_idx_list=valid_frames + self.history_queue_length + 1,
             img_metas=img_metas)
 
         DEBUG = False

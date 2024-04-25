@@ -31,6 +31,7 @@ from .vidar_eval import occ_to_voxel
 @DETECTORS.register_module()
 class ViDARXWorld(BEVFormer):
     def __init__(self,
+                 history_len,
                  # Future predictions.
                  future_pred_head,
                  future_pred_frame_num,  # number of future prediction frames.
@@ -89,6 +90,8 @@ class ViDARXWorld(BEVFormer):
         # if not predict any future,
         #  then only predict current frame.
         self.only_train_cur_frame = (future_pred_frame_num == 0)
+
+        self.history_len = history_len
 
         self.point_cloud_range = point_cloud_range
         self.bev_h = bev_h
@@ -242,7 +245,7 @@ class ViDARXWorld(BEVFormer):
         Returns:
             dict: Losses of different branches.
         """
-        num_frames = img.size(1)
+        num_frames = self.history_len
 
         ## convert the raw occ_gts into to occupancy
         batched_input_occs = []
@@ -276,9 +279,9 @@ class ViDARXWorld(BEVFormer):
         valid_frames = [0]
 
         if self.supervise_all_future:
-                valid_frames.extend(list(range(1, self.future_pred_frame_num + 1)))
+            valid_frames.extend(list(range(self.future_pred_frame_num)))
         else:  # randomly select one future frame for computing loss to save memory cost.
-            train_frame = np.random.choice(np.arange(1, self.future_pred_frame_num + 1), 1)[0]
+            train_frame = np.random.choice(np.arange(self.future_pred_frame_num), 1)[0]
             valid_frames.append(train_frame)
 
         # forecasting the future occupancy
@@ -306,50 +309,41 @@ class ViDARXWorld(BEVFormer):
         losses.update(loss_dict)
         return losses
 
-    def forward_test(self, img_metas, img=None,
-                     gt_points=None, **kwargs):
+    def forward_test(self, 
+                     img_metas, 
+                     img=None,
+                     gt_points=None, 
+                     input_occs=None,
+                     **kwargs):
         """has similar implementation with train forward."""
-        # 1. Extract history BEV features.
-        num_frames = img.size(1)
-        prev_bev = self.obtain_history_bev(img, img_metas)
+        num_frames = self.history_len
+
         self.eval()
 
-        # 2. Align previous frames to reference coordinates.
-        prev_bev = prev_bev[:, None, ...].contiguous()  # bs, 1, bev_h * bev_w, c
+        ## convert the raw occ_gts into to occupancy
+        batched_input_occs = []
+        for bs in range(len(input_occs)):
+            next_occs = []
+            cur_occ = input_occs[bs]
+            for _occ in cur_occ:
+                next_occs.append(occ_to_voxel(_occ))
+            batched_input_occs.append(torch.stack(next_occs, 0))
+        batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
+
+        # Preprocess the historical occupancy
+        x = self.preprocess(batched_input_occs)
+
         next_bev_feats, valid_frames = [], []
-        ref_bev = prev_bev[:, -1].contiguous()
-        next_bev_feats.append(ref_bev.unsqueeze(0).repeat(
-            len(self.future_pred_head.bev_pred_head), 1, 1, 1
-        ).contiguous())
-        valid_frames.append(0)
 
         # 3. predict future BEV.
-        valid_frames.extend(list(range(1, self.test_future_frame_num+1)))
-        prev_img_metas = copy.deepcopy(img_metas)
-        prev_img_metas = [[each[num_frames - 1]] for each in prev_img_metas]
-        ref_to_history_list = self._get_history_ref_to_previous_transform(
-            prev_bev, prev_bev.shape[1], prev_img_metas)
+        valid_frames.extend(list(range(self.test_future_frame_num)))
         img_metas = [each[num_frames - 1] for each in img_metas]
-        for future_frame_index in range(1, self.test_future_frame_num + 1):
-            # 1. obtain the coordinates of future BEV query to previous frames.
-            tgt_grids, aligned_prev_grids, ref2future = self._align_bev_coordnates(
-                future_frame_index, ref_to_history_list, img_metas)
 
-            next_bev = self.future_pred_head(
-                prev_bev, img_metas, future_frame_index,
-                tgt_points=tgt_grids, bev_h=self.bev_h, bev_w=self.bev_w, ref_points=aligned_prev_grids)
-            next_bev_feats.append(next_bev)
+        # forecasting the future occupancy
+        next_bev_preds = self.future_pred_head.forward_head(x)
+        next_bev_preds = self.post_process(next_bev_preds)  # (bs, F, X, Y, Z, c)
+        next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> (b f) c () () (x y) z')
 
-            # 3. update pred_feat to prev_bev_input and update ref_to_history_list.
-            prev_bev = torch.cat([prev_bev, next_bev[-1].unsqueeze(1)], 1)
-            prev_bev = prev_bev[:, 1:, ...].contiguous()
-            # update ref2future to ref_to_history_list.
-            ref_to_history_list = torch.cat([ref_to_history_list, ref2future.unsqueeze(1)], 1)
-            ref_to_history_list = ref_to_history_list[:, 1:].contiguous()
-
-        # pred_frame_num, inter_num, bs, bev_h * bev_w, embed_dims.
-        next_bev_feats = torch.stack(next_bev_feats, 0)
-        next_bev_preds = self.future_pred_head.forward_head(next_bev_feats)
         pred_dict = {
             'next_bev_features': next_bev_feats,
             'next_bev_preds': next_bev_preds,
