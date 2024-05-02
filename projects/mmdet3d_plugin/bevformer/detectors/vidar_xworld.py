@@ -19,6 +19,7 @@ from mmcv.runner import force_fp32, auto_fp16
 from mmdet.models import DETECTORS
 import copy
 import numpy as np
+import torch.nn.functional as F
 from einops import rearrange
 from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
 from projects.mmdet3d_plugin.bevformer.dense_heads.mimo_modules import preprocess
@@ -77,7 +78,7 @@ class ViDARXWorld(BEVFormer):
                 
                  # XWorld parameters
                  expansion=8,
-                 num_classes=12,
+                 num_classes=2,
                  patch_size=2,
 
                  *args,
@@ -221,6 +222,46 @@ class ViDARXWorld(BEVFormer):
         logits = self.predicter(x)
         return logits
     
+    def transform_inputs(self, inputs, type='grid_sample'):
+        if type == 'grid_sample':
+            # grid sample the original occupancy to the target pc range.
+            # generate normalized grid
+            device = batched_input_occs.device
+            x_size = 200
+            y_size = 200
+            z_size = 16
+            x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
+            y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
+            z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
+            grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
+
+            grid[..., 0] = grid[..., 0] * (51.2 / 50)
+            grid[..., 1] = grid[..., 1] * (51.2 / 50)
+            # grid[..., 2] = grid[..., 2] - (4 / 16.0)
+
+            # add flow to grid
+            _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
+            _batched_input_occs = _batched_input_occs + 1
+
+            bs = _batched_input_occs.shape[0]
+            grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
+            _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
+                                                grid.flip(-1).float(), 
+                                                mode='nearest', 
+                                                padding_mode='zeros',
+                                                align_corners=True)
+
+            batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
+            batched_input_occs[batched_input_occs == 0] = 12
+            batched_input_occs = batched_input_occs - 1
+        elif type == 'binary':
+            ## convert the occupancy to binary occupancy
+            batched_input_occs[batched_input_occs != 11] = 0
+            batched_input_occs[batched_input_occs == 11] = 1
+        else:
+            raise ValueError(f"Unknown input transform type: {type}")
+        return batched_input_occs
+    
     @auto_fp16(apply_to=('img', 'points'))
     def forward_train(self,
                       input_occs=None,
@@ -257,6 +298,41 @@ class ViDARXWorld(BEVFormer):
             batched_input_occs.append(torch.stack(next_occs, 0))
         batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
 
+        ## convert the occupancy to binary occupancy
+        batched_input_occs[batched_input_occs != 11] = 0
+        batched_input_occs[batched_input_occs == 11] = 1
+
+        # grid sample the original occupancy to the target pc range.
+        # generate normalized grid
+        # device = batched_input_occs.device
+        # x_size = 200
+        # y_size = 200
+        # z_size = 16
+        # x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
+        # y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
+        # z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
+        # grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
+
+        # grid[..., 0] = grid[..., 0] * (51.2 / 50)
+        # grid[..., 1] = grid[..., 1] * (51.2 / 50)
+        # # grid[..., 2] = grid[..., 2] - (4 / 16.0)
+
+        # # add flow to grid
+        # _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
+        # _batched_input_occs = _batched_input_occs + 1
+
+        # bs = _batched_input_occs.shape[0]
+        # grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
+        # _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
+        #                                     grid.flip(-1).float(), 
+        #                                     mode='nearest', 
+        #                                     padding_mode='zeros',
+        #                                     align_corners=True)
+
+        # batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
+        # batched_input_occs[batched_input_occs == 0] = 12
+        # batched_input_occs = batched_input_occs - 1
+
         # Preprocess the historical occupancy
         x = self.preprocess(batched_input_occs)
 
@@ -287,7 +363,9 @@ class ViDARXWorld(BEVFormer):
         # forecasting the future occupancy
         next_bev_preds = self.future_pred_head.forward_head(x)
         next_bev_preds = self.post_process(next_bev_preds)  # (bs, F, X, Y, Z, c)
-        next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> (b f) c () () (x y) z')
+        next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> b f c y x z')
+        next_bev_preds = rearrange(next_bev_preds, 'b f c y x z -> (b f) c () () (y x) z')
+        # next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> (b f) c () () (x y) z')
 
         # next_bev_preds = rearrange(next_bev_preds, 'b f h w d c -> b f (h w d) c')
         pred_dict = {
@@ -330,6 +408,41 @@ class ViDARXWorld(BEVFormer):
             batched_input_occs.append(torch.stack(next_occs, 0))
         batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
 
+        ## convert the occupancy to binary occupancy
+        batched_input_occs[batched_input_occs != 11] = 0
+        batched_input_occs[batched_input_occs == 11] = 1
+
+        # grid sample the original occupancy to the target pc range.
+        # generate normalized grid
+        # device = batched_input_occs.device
+        # x_size = 200
+        # y_size = 200
+        # z_size = 16
+        # x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
+        # y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
+        # z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
+        # grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
+
+        # grid[..., 0] = grid[..., 0] * (51.2 / 50)
+        # grid[..., 1] = grid[..., 1] * (51.2 / 50)
+        # # grid[..., 2] = grid[..., 2] - (4 / 16.0)
+
+        # # add flow to grid
+        # _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
+        # _batched_input_occs = _batched_input_occs + 1
+
+        # bs = _batched_input_occs.shape[0]
+        # grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
+        # _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
+        #                                     grid.flip(-1).float(), 
+        #                                     mode='nearest', 
+        #                                     padding_mode='zeros',
+        #                                     align_corners=True)
+
+        # batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
+        # batched_input_occs[batched_input_occs == 0] = 12
+        # batched_input_occs = batched_input_occs - 1
+
         # Preprocess the historical occupancy
         x = self.preprocess(batched_input_occs)
 
@@ -342,7 +455,9 @@ class ViDARXWorld(BEVFormer):
         # forecasting the future occupancy
         next_bev_preds = self.future_pred_head.forward_head(x)
         next_bev_preds = self.post_process(next_bev_preds)  # (bs, F, X, Y, Z, c)
-        next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> (b f) c () () (x y) z')
+        next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> b f c y x z')
+        next_bev_preds = rearrange(next_bev_preds, 'b f c y x z -> (b f) c () () (y x) z')
+        # next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> (b f) c () () (x y) z')
 
         pred_dict = {
             'next_bev_features': next_bev_feats,
