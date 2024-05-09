@@ -78,7 +78,7 @@ class ViDARXWorld(BEVFormer):
                 
                  # XWorld parameters
                  expansion=8,
-                 num_classes=2,
+                 num_classes=12,
                  patch_size=2,
 
                  *args,
@@ -299,39 +299,39 @@ class ViDARXWorld(BEVFormer):
         batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
 
         ## convert the occupancy to binary occupancy
-        batched_input_occs[batched_input_occs != 11] = 0
-        batched_input_occs[batched_input_occs == 11] = 1
+        # batched_input_occs[batched_input_occs != 11] = 0
+        # batched_input_occs[batched_input_occs == 11] = 1
 
         # grid sample the original occupancy to the target pc range.
         # generate normalized grid
-        # device = batched_input_occs.device
-        # x_size = 200
-        # y_size = 200
-        # z_size = 16
-        # x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
-        # y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
-        # z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
-        # grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
+        device = batched_input_occs.device
+        x_size = 200
+        y_size = 200
+        z_size = 16
+        x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
+        y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
+        z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
+        grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
 
-        # grid[..., 0] = grid[..., 0] * (51.2 / 50)
-        # grid[..., 1] = grid[..., 1] * (51.2 / 50)
-        # # grid[..., 2] = grid[..., 2] - (4 / 16.0)
+        grid[..., 0] = grid[..., 0] * (51.2 / 50)
+        grid[..., 1] = grid[..., 1] * (51.2 / 50)
+        grid[..., 2] = grid[..., 2] - (4 / 16.0)
 
-        # # add flow to grid
-        # _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
-        # _batched_input_occs = _batched_input_occs + 1
+        # add flow to grid
+        _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
+        _batched_input_occs = _batched_input_occs + 1
 
-        # bs = _batched_input_occs.shape[0]
-        # grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
-        # _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
-        #                                     grid.flip(-1).float(), 
-        #                                     mode='nearest', 
-        #                                     padding_mode='zeros',
-        #                                     align_corners=True)
+        bs = _batched_input_occs.shape[0]
+        grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
+        _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
+                                            grid.flip(-1).float(), 
+                                            mode='nearest', 
+                                            padding_mode='zeros',
+                                            align_corners=True)
 
-        # batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
-        # batched_input_occs[batched_input_occs == 0] = 12
-        # batched_input_occs = batched_input_occs - 1
+        batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
+        batched_input_occs[batched_input_occs == 0] = 12
+        batched_input_occs = batched_input_occs - 1
 
         # Preprocess the historical occupancy
         x = self.preprocess(batched_input_occs)
@@ -409,39 +409,39 @@ class ViDARXWorld(BEVFormer):
         batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
 
         ## convert the occupancy to binary occupancy
-        batched_input_occs[batched_input_occs != 11] = 0
-        batched_input_occs[batched_input_occs == 11] = 1
+        # batched_input_occs[batched_input_occs != 11] = 0
+        # batched_input_occs[batched_input_occs == 11] = 1
 
         # grid sample the original occupancy to the target pc range.
         # generate normalized grid
-        # device = batched_input_occs.device
-        # x_size = 200
-        # y_size = 200
-        # z_size = 16
-        # x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
-        # y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
-        # z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
-        # grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
+        device = batched_input_occs.device
+        x_size = 200
+        y_size = 200
+        z_size = 16
+        x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
+        y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
+        z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
+        grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
 
-        # grid[..., 0] = grid[..., 0] * (51.2 / 50)
-        # grid[..., 1] = grid[..., 1] * (51.2 / 50)
-        # # grid[..., 2] = grid[..., 2] - (4 / 16.0)
+        grid[..., 0] = grid[..., 0] * (51.2 / 50)
+        grid[..., 1] = grid[..., 1] * (51.2 / 50)
+        grid[..., 2] = grid[..., 2] - (4 / 16.0)
 
-        # # add flow to grid
-        # _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
-        # _batched_input_occs = _batched_input_occs + 1
+        # add flow to grid
+        _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
+        _batched_input_occs = _batched_input_occs + 1
 
-        # bs = _batched_input_occs.shape[0]
-        # grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
-        # _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
-        #                                     grid.flip(-1).float(), 
-        #                                     mode='nearest', 
-        #                                     padding_mode='zeros',
-        #                                     align_corners=True)
+        bs = _batched_input_occs.shape[0]
+        grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
+        _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
+                                            grid.flip(-1).float(), 
+                                            mode='nearest', 
+                                            padding_mode='zeros',
+                                            align_corners=True)
 
-        # batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
-        # batched_input_occs[batched_input_occs == 0] = 12
-        # batched_input_occs = batched_input_occs - 1
+        batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
+        batched_input_occs[batched_input_occs == 0] = 12
+        batched_input_occs = batched_input_occs - 1
 
         # Preprocess the historical occupancy
         x = self.preprocess(batched_input_occs)
