@@ -294,11 +294,27 @@ class LoadNuPlanPointsFromMultiSweeps(LoadPointsFromMultiSweeps):
 
 @PIPELINES.register_module()
 class LoadOccupancyGT(object):
-    def __init__(self):
-        pass
+    def __init__(self, 
+                 load_pred_occ=False,
+                 pred_occ_root_dir=None):
+        self.load_pred_occ = load_pred_occ
+        if self.load_pred_occ:
+            assert pred_occ_root_dir is not None, \
+                "pred_occ_root_dir should be provided if load_pred_occ is True"
+            
+            if not pred_occ_root_dir.endswith("/"):
+                pred_occ_root_dir += "/"
+            self.pred_occ_root_dir = pred_occ_root_dir
 
     def __call__(self, results):
         occ_gt_path = results['occ_gt_path']
-        occ_gts = np.load(occ_gt_path)  # (n, 2)
-        results['occ_gts'] = torch.from_numpy(occ_gts)
+        
+        if not self.load_pred_occ:
+            occ_gts = np.load(occ_gt_path)  # (n, 2)
+            results['occ_gts'] = torch.from_numpy(occ_gts)
+        else:
+            occ_pred_path = occ_gt_path.replace("dataset/openscene-v1.0/",
+                                                self.pred_occ_root_dir)
+            occ_preds = np.load(occ_pred_path)['arr_0']  # (x, y, z)
+            results['occ_gts'] = torch.from_numpy(occ_preds)
         return results

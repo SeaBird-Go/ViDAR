@@ -26,7 +26,7 @@ from projects.mmdet3d_plugin.bevformer.dense_heads.mimo_modules import preproces
 from .bevformer import BEVFormer
 from mmdet3d.models import builder
 from ..utils import e2e_predictor_utils, eval_utils
-from .vidar_eval import occ_to_voxel
+from ..utils.occ_utils import occ_to_voxel
 
 
 @DETECTORS.register_module()
@@ -78,7 +78,7 @@ class ViDARXWorld(BEVFormer):
                 
                  # XWorld parameters
                  expansion=8,
-                 num_classes=12,
+                 num_classes=2,
                  patch_size=2,
 
                  *args,
@@ -101,6 +101,11 @@ class ViDARXWorld(BEVFormer):
         self.expansion = expansion
         self.class_embeds = nn.Embedding(num_classes, expansion)
         self.patch_size = patch_size
+
+        self.use_binary_occ = False
+        if num_classes == 2:
+            # use binary occupancy as inputs
+            self.use_binary_occ = True
 
         out_dim = 32
         self.predicter = nn.Sequential(
@@ -137,73 +142,6 @@ class ViDARXWorld(BEVFormer):
         del self.future_pred_head.prev_frame_embedding
         del self.future_pred_head.can_bus_mlp
         del self.future_pred_head.positional_encoding
-
-    ############# Align coordinates between reference (current frame) to other frames. #############
-    def _get_history_ref_to_previous_transform(self, tensor, num_frames, img_metas_list):
-        """Get transformation matrix from reference frame to all previous frames.
-
-        Args:
-            tensor: to convert {ref_to_prev_transform} to device and dtype.
-            num_frames: total num of available history frames.
-            img_metas_list: a list of batch_size items.
-                In each item, there is {num_prev_frames} img_meta for transformation alignment.
-
-        Return:
-            ref_to_history_list (torch.Tensor): with shape as [bs, num_prev_frames, 4, 4]
-        """
-        ref_to_history_list = []
-        for img_metas in img_metas_list:
-            cur_ref_to_prev = [img_metas[i]['ref_lidar_to_cur_lidar'] for i in range(num_frames)]
-            ref_to_history_list.append(cur_ref_to_prev)
-        ref_to_history_list = tensor.new_tensor(np.array(ref_to_history_list))
-        return ref_to_history_list
-
-    def _align_bev_coordnates(self, frame_idx, ref_to_history_list, img_metas):
-        """Align the bev_coordinates of frame_idx to each of history_frames.
-
-        Args:
-            frame_idx: the index of target frame.
-            ref_to_history_list (torch.Tensor): a tensor with shape as [bs, num_prev_frames, 4, 4]
-                indicating the transformation metric from reference to each history frames.
-            img_metas: a list of batch_size items.
-                In each item, there is one img_meta (reference frame)
-                whose {future2ref_lidar_transform} & {ref2future_lidar_transform} are for
-                transformation alignment.
-        """
-        bs, num_frame = ref_to_history_list.shape[:2]
-
-        # 1. get future2ref and ref2future_matrix of frame_idx.
-        future2ref = [img_meta['future2ref_lidar_transform'][frame_idx] for img_meta in img_metas]  # b, 4, 4
-        future2ref = ref_to_history_list.new_tensor(np.array(future2ref))  # bs, 4, 4
-
-        ref2future = [img_meta['ref2future_lidar_transform'][frame_idx] for img_meta in img_metas]  # b, 4, 4
-        ref2future = ref_to_history_list.new_tensor(np.array(ref2future))  # bs, 4, 4
-
-        # 2. compute the transformation matrix from current frame to all previous frames.
-        future2ref = future2ref.unsqueeze(1).repeat(1, num_frame, 1, 1).contiguous()
-        future_to_history_list = torch.matmul(future2ref, ref_to_history_list)
-
-        # 3. compute coordinates of future frame.
-        bev_grids = e2e_predictor_utils.get_bev_grids(
-            self.bev_h, self.bev_w, bs * num_frame)  # bs * num_frame, bev_h, bev_w, 2 (x, y)
-        bev_grids = bev_grids.view(bs, num_frame, -1, 2)
-        bev_coords = e2e_predictor_utils.bev_grids_to_coordinates(
-            bev_grids, self.point_cloud_range)
-
-        # 4. align target coordinates of future frame to each of previous frames.
-        aligned_bev_coords = torch.cat([
-            bev_coords, torch.ones_like(bev_coords[..., :2])], -1)  # b, num_frame, h*w, 4
-        aligned_bev_coords = torch.matmul(aligned_bev_coords, future_to_history_list)
-        aligned_bev_coords = aligned_bev_coords[..., :2]  # b, num_frame, h*w, 2
-        aligned_bev_grids, _ = e2e_predictor_utils.bev_coords_to_grids(
-            aligned_bev_coords, self.bev_h, self.bev_w, self.point_cloud_range)
-        aligned_bev_grids = (aligned_bev_grids + 1) / 2.  # range of [0, 1]
-        # b, h*w, num_frame, 2
-        aligned_bev_grids = aligned_bev_grids.permute(0, 2, 1, 3).contiguous()
-
-        # 5. get target bev_grids at target future frame.
-        tgt_grids = bev_grids[:, -1].contiguous()
-        return tgt_grids, aligned_bev_grids, ref2future
 
     def preprocess(self, x):
         # x: bs, F, H, W, D
@@ -409,39 +347,39 @@ class ViDARXWorld(BEVFormer):
         batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
 
         ## convert the occupancy to binary occupancy
-        # batched_input_occs[batched_input_occs != 11] = 0
-        # batched_input_occs[batched_input_occs == 11] = 1
+        batched_input_occs[batched_input_occs != 11] = 0
+        batched_input_occs[batched_input_occs == 11] = 1
 
         # grid sample the original occupancy to the target pc range.
         # generate normalized grid
-        device = batched_input_occs.device
-        x_size = 200
-        y_size = 200
-        z_size = 16
-        x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
-        y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
-        z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
-        grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
+        # device = batched_input_occs.device
+        # x_size = 200
+        # y_size = 200
+        # z_size = 16
+        # x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
+        # y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
+        # z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
+        # grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
 
-        grid[..., 0] = grid[..., 0] * (51.2 / 50)
-        grid[..., 1] = grid[..., 1] * (51.2 / 50)
-        grid[..., 2] = grid[..., 2] - (4 / 16.0)
+        # grid[..., 0] = grid[..., 0] * (51.2 / 50)
+        # grid[..., 1] = grid[..., 1] * (51.2 / 50)
+        # grid[..., 2] = grid[..., 2] - (4 / 16.0)
 
-        # add flow to grid
-        _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
-        _batched_input_occs = _batched_input_occs + 1
+        # # add flow to grid
+        # _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
+        # _batched_input_occs = _batched_input_occs + 1
 
-        bs = _batched_input_occs.shape[0]
-        grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
-        _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
-                                            grid.flip(-1).float(), 
-                                            mode='nearest', 
-                                            padding_mode='zeros',
-                                            align_corners=True)
+        # bs = _batched_input_occs.shape[0]
+        # grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
+        # _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
+        #                                     grid.flip(-1).float(), 
+        #                                     mode='nearest', 
+        #                                     padding_mode='zeros',
+        #                                     align_corners=True)
 
-        batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
-        batched_input_occs[batched_input_occs == 0] = 12
-        batched_input_occs = batched_input_occs - 1
+        # batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
+        # batched_input_occs[batched_input_occs == 0] = 12
+        # batched_input_occs = batched_input_occs - 1
 
         # Preprocess the historical occupancy
         x = self.preprocess(batched_input_occs)
