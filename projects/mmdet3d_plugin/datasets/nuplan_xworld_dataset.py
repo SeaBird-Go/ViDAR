@@ -212,6 +212,12 @@ class NuPlanXWorldDataset(NuPlanViDARDatasetV1):
                 flow_gt_list = [each['flow_gts'] for each in future_queue] 
                 ret_queue['flow_gts'] = DC(flow_gt_list, cpu_only=False)
 
+            if 'occ_preds' in previous_queue[-1]:
+                input_occs_list = [each['occ_preds'] for each in previous_queue] 
+                ret_queue['input_occs'] = DC(torch.stack(input_occs_list), 
+                                             cpu_only=False,
+                                             stack=True)
+
         if len(future_can_bus) < 1 + self.future_length:
             return None
         return ret_queue

@@ -9,12 +9,12 @@ dst_path = sys.argv[2]  # path/to/your/submission.pkl
 # Update method / authors / email / institution / country to your
 #  Corresponding information.
 sv_pkl = dict(
-    method=None,
-    team=None,
-    authors=None,
-    email=None,
-    institution=None,
-    country=None,
+    method="XWorld",
+    team="Huawei Noah's Ark Lab",
+    authors="Haiming Zhang, Xu Yan, Ying Xue, Zixuan Guo, Bingbing Liu, Zhen Li",
+    email="haimingzhang@link.cuhk.edu.cn",
+    institution="The Chinese University of Hong Kong (Shenzhen), Huawei Noah's Ark Lab",
+    country="China",
 )
 
 frame_prefix = 'frame'

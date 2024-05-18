@@ -39,7 +39,7 @@ def occupancy2pointcloud(occupancy,
 def voxel2points(voxel, 
                  voxel_size=[0.5, 0.5, 0.5], 
                  range=[-50.0, -50.0, -4.0, 50.0, 50.0, 4.0], 
-                 ignore_labels=[16, 255]):
+                 ignore_labels=[11]):
     if isinstance(voxel, np.ndarray): 
         voxel = torch.from_numpy(voxel)
     

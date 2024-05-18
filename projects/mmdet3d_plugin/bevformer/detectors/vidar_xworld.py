@@ -70,7 +70,7 @@ class ViDARXWorld(BEVFormer):
 
                  # Visualize point cloud.
                  _viz_pcd_flag=False,
-                 _viz_pcd_path='dbg/pred_pcd',  # root/{prefix}
+                 _viz_pcd_path='dbg/binary_pred_pcd',  # root/{prefix}
 
                  # Test server submission.
                  _submission=False,  # Flags for submission.
@@ -80,6 +80,7 @@ class ViDARXWorld(BEVFormer):
                  expansion=8,
                  num_classes=2,
                  patch_size=2,
+                 load_pred_occ=False,
 
                  *args,
                  **kwargs,):
@@ -102,6 +103,7 @@ class ViDARXWorld(BEVFormer):
         self.class_embeds = nn.Embedding(num_classes, expansion)
         self.patch_size = patch_size
 
+        self.load_pred_occ = load_pred_occ
         self.use_binary_occ = False
         if num_classes == 2:
             # use binary occupancy as inputs
@@ -331,24 +333,28 @@ class ViDARXWorld(BEVFormer):
                      gt_points=None, 
                      input_occs=None,
                      **kwargs):
-        """has similar implementation with train forward."""
         num_frames = self.history_len
 
         self.eval()
 
-        ## convert the raw occ_gts into to occupancy
-        batched_input_occs = []
-        for bs in range(len(input_occs)):
-            next_occs = []
-            cur_occ = input_occs[bs]
-            for _occ in cur_occ:
-                next_occs.append(occ_to_voxel(_occ))
-            batched_input_occs.append(torch.stack(next_occs, 0))
-        batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
+        if not self.load_pred_occ:
+            ## convert the raw occ_gts into to occupancy
+            batched_input_occs = []
+            for bs in range(len(input_occs)):
+                next_occs = []
+                cur_occ = input_occs[bs]
+                for _occ in cur_occ:
+                    next_occs.append(occ_to_voxel(_occ))
+                batched_input_occs.append(torch.stack(next_occs, 0))
+            batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
 
-        ## convert the occupancy to binary occupancy
-        batched_input_occs[batched_input_occs != 11] = 0
-        batched_input_occs[batched_input_occs == 11] = 1
+            ## convert the occupancy to binary occupancy
+            batched_input_occs[batched_input_occs != 11] = 0
+            batched_input_occs[batched_input_occs == 11] = 1  # free voxels
+        else:
+            # if load the predicted occupancy, 
+            # the occupancy is already with the shape of (bs, F, H, W, D)
+            batched_input_occs = input_occs.long()
 
         # grid sample the original occupancy to the target pc range.
         # generate normalized grid
@@ -455,10 +461,8 @@ class ViDARXWorld(BEVFormer):
                         gt_pcd=gt_pcd_inside.cpu().numpy()
                     )
 
-                if self._submission and frame_idx > 0:
-                    # ViDAR additionally predict the current frame as 0-th index.
-                    #   So, we need to ignore the 0-th index by default.
-                    self._save_prediction(pred_pcd, img_metas[bs], frame_idx)
+                if self._submission:
+                    self._save_prediction(pred_pcd, img_metas[bs], frame_idx + 1)
 
                 count += 1
             ret_dict[f'frame.{frame_name}']['count'] = count

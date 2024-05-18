@@ -315,6 +315,12 @@ class LoadOccupancyGT(object):
         else:
             occ_pred_path = occ_gt_path.replace("dataset/openscene-v1.0/",
                                                 self.pred_occ_root_dir)
+            # for compatibility with the new version
+            occ_pred_path = occ_pred_path.replace("data/openscene-v1.0/",
+                                                  self.pred_occ_root_dir)
+            occ_pred_path += ".npz"
+
             occ_preds = np.load(occ_pred_path)['arr_0']  # (x, y, z)
-            results['occ_gts'] = torch.from_numpy(occ_preds)
+            occ_preds = 1 - occ_preds  # make 1 is free
+            results['occ_preds'] = torch.from_numpy(occ_preds)
         return results

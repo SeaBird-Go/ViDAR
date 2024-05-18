@@ -65,7 +65,7 @@ bev_w_ = 200
 model = dict(
     type='ViDAR',
     _submission=True,
-    _submission_path='test_submit',
+    _submission_path='test_submit_vidar_mini_full',
 
     use_grid_mask=True,
     video_test_mode=True,

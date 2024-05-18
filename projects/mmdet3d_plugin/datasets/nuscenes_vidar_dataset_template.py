@@ -195,6 +195,14 @@ class NuScenesViDARDatasetTemplate(CustomNuScenesDataset):
             print(f'==== {frame_k} results: ====')
             for k, v in frame_res.items():
                 print(f'{k}: {v}')
+        
+        ## compute the overall chamfer distance
+        print('==== Overall results: ====')
+        all_chamfer_distance = []
+        for frame_k, frame_res in res_dict_all.items():
+            all_chamfer_distance.append(frame_res['chamfer_distance'])
+        print(f'Overall chamfer distance: {np.mean(all_chamfer_distance[-6:])}')
+
         return res_dict_all
 
     def __getitem__(self, idx):
