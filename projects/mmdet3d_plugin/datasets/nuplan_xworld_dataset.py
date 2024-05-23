@@ -95,6 +95,20 @@ class NuPlanXWorldDataset(NuPlanViDARDatasetV1):
                                       curr_e2l_transform.T)
             total_ref2cur_lidar_transform.append(ref_lidar_to_cur_lidar)
 
+        ## get the current ego to future ego transformation for flow alignment
+        future_global2ego = []
+        for i, each in enumerate(future_queue[1:]):
+            future_meta = each['img_metas'].data
+
+            curr_e2g_translation = future_meta['ego2global_translation']
+            curr_e2g_rotation = future_meta['ego2global_rotation']
+            curr_g2e_transform = transform_matrix(
+                curr_e2g_translation, Quaternion(curr_e2g_rotation), inverse=True)
+            future_global2ego.append(curr_g2e_transform)
+        future_global2ego = np.asarray(future_global2ego)
+
+        curr_ego_to_future_ego = future_global2ego @ ref_e2g_transform[None] # (N, 4, 4)
+
         # 2. Parse previous and future can_bus information.
         if self.use_img:
             imgs_list = [each['img'].data for each in previous_queue]
@@ -194,6 +208,8 @@ class NuPlanXWorldDataset(NuPlanViDARDatasetV1):
             np.array(total_cur2ref_lidar_transform))
         metas_map[len(previous_queue) - 1]['total_ref2cur_lidar_transform'] = (
             np.array(total_ref2cur_lidar_transform))
+        
+        metas_map[len(previous_queue) - 1]['curr_ego_to_future_ego'] = curr_ego_to_future_ego
 
         ret_queue['img_metas'] = DC(metas_map, cpu_only=True)
         ret_queue.pop('points')

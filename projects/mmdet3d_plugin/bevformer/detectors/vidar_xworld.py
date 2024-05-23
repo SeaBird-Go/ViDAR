@@ -25,6 +25,7 @@ from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
 from projects.mmdet3d_plugin.bevformer.dense_heads.mimo_modules import preprocess
 from .bevformer import BEVFormer
 from mmdet3d.models import builder
+from mmengine.registry import MODELS
 from ..utils import e2e_predictor_utils, eval_utils
 from ..utils.occ_utils import occ_to_voxel
 
@@ -162,8 +163,10 @@ class ViDARXWorld(BEVFormer):
         logits = self.predicter(x)
         return logits
     
-    def transform_inputs(self, inputs, type='grid_sample'):
+    def transform_inputs(self, batched_input_occs, type='grid_sample'):
         if type == 'grid_sample':
+            num_frames = self.history_len
+
             # grid sample the original occupancy to the target pc range.
             # generate normalized grid
             device = batched_input_occs.device
@@ -177,7 +180,7 @@ class ViDARXWorld(BEVFormer):
 
             grid[..., 0] = grid[..., 0] * (51.2 / 50)
             grid[..., 1] = grid[..., 1] * (51.2 / 50)
-            # grid[..., 2] = grid[..., 2] - (4 / 16.0)
+            grid[..., 2] = grid[..., 2] - (4 / 16.0)
 
             # add flow to grid
             _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
@@ -200,6 +203,30 @@ class ViDARXWorld(BEVFormer):
             batched_input_occs[batched_input_occs == 11] = 1
         else:
             raise ValueError(f"Unknown input transform type: {type}")
+        return batched_input_occs
+    
+    def get_occ_inputs(self, input_occs):
+        ## convert the raw occ_gts into to occupancy
+        if self.training or not self.load_pred_occ:
+            batched_input_occs = []
+            for bs in range(len(input_occs)):
+                next_occs = []
+                cur_occ = input_occs[bs]
+                for _occ in cur_occ:
+                    next_occs.append(occ_to_voxel(_occ))
+                batched_input_occs.append(torch.stack(next_occs, 0))
+            batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
+        else:
+            # if load the predicted occupancy, 
+            # the occupancy is already with the shape of (bs, F, H, W, D)
+            batched_input_occs = input_occs.long()
+
+        if self.use_binary_occ:
+            batched_input_occs = self.transform_inputs(
+                batched_input_occs, type='binary')
+        else:
+            batched_input_occs = self.transform_inputs(
+                batched_input_occs, type='grid_sample')
         return batched_input_occs
     
     @auto_fp16(apply_to=('img', 'points'))
@@ -238,40 +265,47 @@ class ViDARXWorld(BEVFormer):
             batched_input_occs.append(torch.stack(next_occs, 0))
         batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
 
+        if self.use_binary_occ:
+            batched_input_occs = self.transform_inputs(
+                batched_input_occs, type='binary')
+        else:
+            batched_input_occs = self.transform_inputs(
+                batched_input_occs, type='grid_sample')
+
         ## convert the occupancy to binary occupancy
         # batched_input_occs[batched_input_occs != 11] = 0
         # batched_input_occs[batched_input_occs == 11] = 1
 
         # grid sample the original occupancy to the target pc range.
         # generate normalized grid
-        device = batched_input_occs.device
-        x_size = 200
-        y_size = 200
-        z_size = 16
-        x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
-        y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
-        z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
-        grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
+        # device = batched_input_occs.device
+        # x_size = 200
+        # y_size = 200
+        # z_size = 16
+        # x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
+        # y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
+        # z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
+        # grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
 
-        grid[..., 0] = grid[..., 0] * (51.2 / 50)
-        grid[..., 1] = grid[..., 1] * (51.2 / 50)
-        grid[..., 2] = grid[..., 2] - (4 / 16.0)
+        # grid[..., 0] = grid[..., 0] * (51.2 / 50)
+        # grid[..., 1] = grid[..., 1] * (51.2 / 50)
+        # grid[..., 2] = grid[..., 2] - (4 / 16.0)
 
-        # add flow to grid
-        _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
-        _batched_input_occs = _batched_input_occs + 1
+        # # add flow to grid
+        # _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
+        # _batched_input_occs = _batched_input_occs + 1
 
-        bs = _batched_input_occs.shape[0]
-        grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
-        _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
-                                            grid.flip(-1).float(), 
-                                            mode='nearest', 
-                                            padding_mode='zeros',
-                                            align_corners=True)
+        # bs = _batched_input_occs.shape[0]
+        # grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
+        # _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
+        #                                     grid.flip(-1).float(), 
+        #                                     mode='nearest', 
+        #                                     padding_mode='zeros',
+        #                                     align_corners=True)
 
-        batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
-        batched_input_occs[batched_input_occs == 0] = 12
-        batched_input_occs = batched_input_occs - 1
+        # batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
+        # batched_input_occs[batched_input_occs == 0] = 12
+        # batched_input_occs = batched_input_occs - 1
 
         # Preprocess the historical occupancy
         x = self.preprocess(batched_input_occs)
@@ -348,13 +382,20 @@ class ViDARXWorld(BEVFormer):
                 batched_input_occs.append(torch.stack(next_occs, 0))
             batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
 
-            ## convert the occupancy to binary occupancy
-            batched_input_occs[batched_input_occs != 11] = 0
-            batched_input_occs[batched_input_occs == 11] = 1  # free voxels
+            # ## convert the occupancy to binary occupancy
+            # batched_input_occs[batched_input_occs != 11] = 0
+            # batched_input_occs[batched_input_occs == 11] = 1  # free voxels
         else:
             # if load the predicted occupancy, 
             # the occupancy is already with the shape of (bs, F, H, W, D)
             batched_input_occs = input_occs.long()
+
+        if self.use_binary_occ:
+            batched_input_occs = self.transform_inputs(
+                batched_input_occs, type='binary')
+        else:
+            batched_input_occs = self.transform_inputs(
+                batched_input_occs, type='grid_sample')
 
         # grid sample the original occupancy to the target pc range.
         # generate normalized grid
@@ -505,3 +546,370 @@ class ViDARXWorld(BEVFormer):
             pred_pcd, pred_label, color_map, output_path=output_path,
             ctr=pred_ctr, ctr_labels=np.zeros_like(pred_ctr)[:, 0].astype(np.int)
         )
+
+
+def warp_bev_features(voxel_feats, 
+                      voxel_flow,
+                      voxel_size, 
+                      occ_size,
+                      curr_ego_to_future_ego=None):
+    """Warp the given voxel features using the predicted voxel flow.
+
+    Args:
+        voxel_feats (Tensor): _description_
+        voxel_flow (Tensor): (bs, f, H, W, 2)
+        voxel_size (Tensor): the voxel size for each voxel, for example torch.Tensor([0.4, 0.4])
+        occ_size (Tensor): the size of the occupancy map, for example torch.Tensor([200, 200])
+        extrinsic_matrix (_type_, optional): global to ego transformation matrix. Defaults to None.
+
+    Returns:
+        _type_: _description_
+    """
+    device = voxel_feats.device
+    bs, num_pred, x_size, y_size, c = voxel_flow.shape
+
+    if curr_ego_to_future_ego is not None:
+        for i in range(bs):
+            _extrinsic_matrix = curr_ego_to_future_ego[i]
+            _voxel_flow = voxel_flow[i].reshape(num_pred, -1, 2)
+            ## padding the zero flow for z axis
+            _voxel_flow = torch.cat([_voxel_flow, torch.zeros(num_pred, _voxel_flow.shape[1], 1).to(device)], dim=-1)
+            trans_flow = torch.matmul(_extrinsic_matrix[..., :3, :3], _voxel_flow.permute(0, 2, 1))
+            trans_flow = trans_flow + _extrinsic_matrix[..., :3, 3][:, :, None]
+            trans_flow = trans_flow.permute(0, 2, 1)[..., :2]
+            voxel_flow[i] = trans_flow.reshape(num_pred, *voxel_flow.shape[2:])
+
+    voxel_flow = rearrange(voxel_flow, 'b f h w dim2 -> (b f) h w dim2')
+    new_bs = voxel_flow.shape[0]
+
+    # normalize the flow in m/s unit to voxel unit and then to [-1, 1]
+    voxel_size = voxel_size.to(device)
+    occ_size = occ_size.to(device)
+
+    voxel_flow = voxel_flow / voxel_size / occ_size
+
+    # generate normalized grid
+    x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1).repeat(1, y_size).to(device)
+    y = torch.linspace(-1.0, 1.0, y_size).view(1, -1).repeat(x_size, 1).to(device)
+    grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1)], dim=-1)  # (h, w, 2)
+    
+    # add flow to grid
+    grid = grid.unsqueeze(0).expand(new_bs, -1, -1, -1).flip(-1) + voxel_flow
+
+    # perform the voxel feature warping
+    voxel_feats = torch.repeat_interleave(voxel_feats, num_pred, dim=0)
+    warped_voxel_feats = F.grid_sample(voxel_feats, 
+                                       grid.float(), 
+                                       mode='bilinear', 
+                                       padding_mode='border')
+    warped_voxel_feats = rearrange(warped_voxel_feats, '(b f) c h w -> b f c h w', b=bs)
+
+    return warped_voxel_feats
+
+
+@DETECTORS.register_module()
+class ViDARXWorldWithFlow(ViDARXWorld):
+    def __init__(self,
+                 refine_decoder=None,
+                 pred_abs_flow=False,
+                 **kwargs):
+        super().__init__(**kwargs)
+
+        # the predicted flow is absolute flow defined in the world coordinate
+        self.pred_abs_flow = pred_abs_flow
+
+        self.flow_net = nn.Sequential(
+            nn.Linear(128, 32 * 2),
+            nn.Softplus(),
+            nn.Linear(32 * 2, 2),
+        )
+        
+        model_channel = 128
+        channel = 8 * 16 * 2 * 2
+        self.up_conv = nn.Sequential(
+            nn.ConvTranspose2d(model_channel, model_channel, 3, 2, 1, output_padding=1, bias=False),
+            nn.GroupNorm(1, model_channel),
+            nn.SiLU(inplace=True),
+
+            nn.ConvTranspose2d(model_channel, channel, 1, 1, 0, bias=False),
+        )
+
+        # self.refine_decoder = builder.build_backbone(refine_decoder)
+        self.refine_decoder = MODELS.build(refine_decoder)
+
+        self.predicter2 = nn.Sequential(
+            nn.Linear(self.expansion, 32*2),
+            nn.Softplus(),
+            nn.Linear(32*2, 1),
+        )
+
+    @auto_fp16(apply_to=('img', 'points'))
+    def forward_train(self,
+                      input_occs=None,
+                      img_metas=None,
+                      img=None,
+                      gt_points=None,
+                      img_depth=None,
+                      img_mask=None,
+                      **kwargs,
+                      ):
+        num_frames = self.history_len
+
+        batched_input_occs = self.get_occ_inputs(input_occs)
+
+        # Preprocess the historical occupancy
+        x = self.preprocess(batched_input_occs)
+
+        # forecasting the future occupancy
+        bev_flow_pred, input_feats = self.future_pred_head.forward_head(
+            x, return_encoder_feat=True, **kwargs)
+        bev_flow_pred = self.predict_bev_flow(bev_flow_pred)
+
+        ## warp the current occupancy map using the predicted flow
+        # bev_flow_pred = rearrange(bev_flow_pred, 'b f h w dim2 -> (b f) h w dim2')
+        curr_bev_feat = self.extract_curr_bev_feat(input_feats)
+
+        curr_ego_to_future_ego_trans = None
+        if self.pred_abs_flow:
+            metas = [each[num_frames-1] for each in img_metas]
+
+            curr_ego_to_future_ego_list = []
+            for meta in metas:
+                curr_ego_to_future_ego = torch.from_numpy(meta['curr_ego_to_future_ego']).to(x.device)
+                curr_ego_to_future_ego_list.append(curr_ego_to_future_ego.to(torch.float32))
+
+            curr_ego_to_future_ego_trans = torch.stack(curr_ego_to_future_ego_list, dim=0)  # (bs, num_pred, 4, 4)
+        
+        if self.pred_abs_flow:
+            warped_predicted_occ = warp_bev_features(
+                curr_bev_feat, 
+                bev_flow_pred, 
+                voxel_size=torch.Tensor([51.2 * 2 / 200.0, 51.2 * 2 / 200.0]), 
+                occ_size=torch.Tensor([200.0, 200.0]),
+                curr_ego_to_future_ego=curr_ego_to_future_ego_trans)
+        else:
+            raise ValueError('Only support absolute flow prediction for now.')
+            
+        coarse_logits = self.get_coarse_occ(warped_predicted_occ)
+        coarse_next_bev_preds = rearrange(coarse_logits, 'b f x y z c -> b f c y x z')
+        coarse_next_bev_preds = rearrange(coarse_next_bev_preds, 'b f c y x z -> (b f) c () () (y x) z')
+
+        refined_occ = self.refine_decoder(warped_predicted_occ)
+        next_bev_preds = self.post_process2(refined_occ) # (bs, F, X, Y, Z, c)
+        next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> b f c y x z')
+        next_bev_preds = rearrange(next_bev_preds, 'b f c y x z -> (b f) c () () (y x) z')
+        
+        valid_frames = [0]
+        if self.supervise_all_future:
+            valid_frames.extend(list(range(self.future_pred_frame_num)))
+        else:  # randomly select one future frame for computing loss to save memory cost.
+            train_frame = np.random.choice(np.arange(self.future_pred_frame_num), 1)[0]
+            valid_frames.append(train_frame)
+
+        # C2. Check whether the frame has previous frames.
+        prev_bev_exists_list = []
+        prev_img_metas = copy.deepcopy(img_metas)
+
+        img_metas = [each[num_frames-1] for each in img_metas]
+
+        assert len(prev_img_metas) == 1, 'Only supports bs=1 for now.'
+        for prev_img_meta in prev_img_metas:  # Loop batch.
+            max_key = len(prev_img_meta) - 1
+            prev_bev_exists = True
+            for k in range(max_key, -1, -1):
+                each = prev_img_meta[k]
+                prev_bev_exists_list.append(prev_bev_exists)
+                prev_bev_exists = prev_bev_exists and each['prev_bev_exists']
+        prev_bev_exists_list = np.array(prev_bev_exists_list)[::-1]
+        
+        pred_dict = {
+            'next_bev_preds': next_bev_preds,
+            'valid_frames': valid_frames,
+            'full_prev_bev_exists': prev_bev_exists_list.all(),
+            'prev_bev_exists_list': prev_bev_exists_list,
+        }
+
+        # 5. Compute loss for point cloud predictions.
+        start_idx = 0
+        losses = dict()
+        loss_dict = self.future_pred_head.loss(
+            pred_dict, gt_points, start_idx,
+            tgt_bev_h=self.bev_h, tgt_bev_w=self.bev_w,
+            tgt_pc_range=self.point_cloud_range,
+            pred_frame_num=self.future_pred_frame_num+1,
+            img_metas=img_metas)
+        losses.update(loss_dict)
+
+        # compute the coarse loss
+        coarse_pred_cit = {
+            'next_bev_preds': coarse_next_bev_preds,
+            'valid_frames': valid_frames,
+            'full_prev_bev_exists': prev_bev_exists_list.all(),
+            'prev_bev_exists_list': prev_bev_exists_list,
+        }
+        start_idx = 0
+        coarse_loss_dict = self.future_pred_head.loss(
+            coarse_pred_cit, gt_points, start_idx,
+            tgt_bev_h=self.bev_h, tgt_bev_w=self.bev_w,
+            tgt_pc_range=self.point_cloud_range,
+            pred_frame_num=self.future_pred_frame_num+1,
+            img_metas=img_metas, suffix='coarse')
+        
+        for key, value in coarse_loss_dict.items():
+            coarse_loss_dict[key] = value * 0.1
+        losses.update(coarse_loss_dict)
+
+        return losses
+
+    def get_coarse_occ(self, x):
+        _x = rearrange(x, 'b f (d c) h w -> b f h w d c', c=self.expansion)
+        logits = self.predicter(_x)
+        return logits
+    
+    def predict_bev_flow(self, x):
+        x = preprocess.reshape_patch_back(x, self.patch_size)
+
+        x = rearrange(x, 'b f c h w -> b f h w c')
+        logits = self.flow_net(x)
+        return logits
+    
+    def extract_curr_bev_feat(self, x):
+        x = x[:, -1]  # to (b, c, h, w)
+        x = self.up_conv(x)[:, None]  # to (b, 1, c, h, w)
+
+        x = preprocess.reshape_patch_back(x, self.patch_size)
+        x = rearrange(x, 'b () c h w -> b c h w')
+        return x
+    
+    def post_process2(self, x):
+        x = rearrange(x, 'b f (d c) h w -> b f h w d c', c=self.expansion)
+        logits = self.predicter2(x)
+        return logits
+
+    def forward_test(self, 
+                     img_metas, 
+                     img=None,
+                     gt_points=None, 
+                     input_occs=None,
+                     **kwargs):
+        num_frames = self.history_len
+
+        self.eval()
+
+        batched_input_occs = self.get_occ_inputs(input_occs)
+
+        # Preprocess the historical occupancy
+        x = self.preprocess(batched_input_occs)
+
+        next_bev_feats, valid_frames = [], []
+
+        # 3. predict future BEV.
+        valid_frames.extend(list(range(self.test_future_frame_num)))
+
+        # forecasting the future occupancy
+        bev_flow_pred, input_feats = self.future_pred_head.forward_head(
+            x, return_encoder_feat=True, **kwargs)
+        bev_flow_pred = self.predict_bev_flow(bev_flow_pred)
+
+        ## warp the current occupancy map using the predicted flow
+        # bev_flow_pred = rearrange(bev_flow_pred, 'b f h w dim2 -> (b f) h w dim2')
+        curr_bev_feat = self.extract_curr_bev_feat(input_feats)
+
+        curr_ego_to_future_ego_trans = None
+        if self.pred_abs_flow:
+            metas = [each[num_frames-1] for each in img_metas]
+
+            curr_ego_to_future_ego_list = []
+            for meta in metas:
+                curr_ego_to_future_ego = torch.from_numpy(meta['curr_ego_to_future_ego']).to(x.device)
+                curr_ego_to_future_ego_list.append(curr_ego_to_future_ego.to(torch.float32))
+
+            curr_ego_to_future_ego_trans = torch.stack(curr_ego_to_future_ego_list, dim=0)  # (bs, num_pred, 4, 4)
+        
+        if self.pred_abs_flow:
+            warped_predicted_occ = warp_bev_features(
+                curr_bev_feat, 
+                bev_flow_pred, 
+                voxel_size=torch.Tensor([51.2 * 2 / 200.0, 51.2 * 2 / 200.0]), 
+                occ_size=torch.Tensor([200.0, 200.0]),
+                curr_ego_to_future_ego=curr_ego_to_future_ego_trans)
+        else:
+            raise ValueError('Only support absolute flow prediction for now.')
+            
+        refined_occ = self.refine_decoder(warped_predicted_occ)
+
+        next_bev_preds = self.post_process2(refined_occ)  # (bs, F, X, Y, Z, c)
+        next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> b f c y x z')
+        next_bev_preds = rearrange(next_bev_preds, 'b f c y x z -> (b f) c () () (y x) z')
+
+        pred_dict = {
+            'next_bev_features': next_bev_feats,
+            'next_bev_preds': next_bev_preds,
+            'valid_frames': valid_frames,
+        }
+
+        # from list to batched tensor
+        img_metas = [each[num_frames - 1] for each in img_metas]
+
+        # decode results and compute some statistic results if needed.
+        start_idx = 0
+        decode_dict = self.future_pred_head.get_point_cloud_prediction(
+            pred_dict, gt_points, start_idx,
+            tgt_bev_h=self.bev_h, tgt_bev_w=self.bev_w,
+            tgt_pc_range=self.point_cloud_range, img_metas=img_metas)
+
+        # convert decode_dict to quantitative statistics.
+        pred_pcds = decode_dict['pred_pcds']
+        gt_pcds = decode_dict['gt_pcds']
+        scene_origin = decode_dict['origin']
+
+        pred_frame_num = len(pred_pcds[0])
+        ret_dict = dict()
+        for frame_idx in range(pred_frame_num):
+            count = 0
+            frame_name = frame_idx + start_idx
+            ret_dict[f'frame.{frame_name}'] = dict(
+                count=0,
+                chamfer_distance=0,
+                l1_error=0,
+                absrel_error=0,
+            )
+            for bs in range(len(pred_pcds)):
+                pred_pcd = pred_pcds[bs][frame_idx]
+                gt_pcd = gt_pcds[bs][frame_idx]
+
+                ret_dict[f'frame.{frame_name}']['chamfer_distance'] += (
+                    e2e_predictor_utils.compute_chamfer_distance_inner(
+                        pred_pcd, gt_pcd, self.point_cloud_range).item())
+
+                l1_error, absrel_error = eval_utils.compute_ray_errors(
+                    pred_pcd.cpu().numpy(), gt_pcd.cpu().numpy(),
+                    scene_origin[bs, frame_idx].cpu().numpy(), scene_origin.device)
+                ret_dict[f'frame.{frame_name}']['l1_error'] += l1_error
+                ret_dict[f'frame.{frame_name}']['absrel_error'] += absrel_error
+
+                if self._viz_pcd_flag:
+                    cur_name = img_metas[bs]['sample_idx']
+                    out_path = f'{self._viz_pcd_path}_{cur_name}_{frame_name}.png'
+                    gt_inside_mask = e2e_predictor_utils.get_inside_mask(gt_pcd, self.point_cloud_range)
+                    gt_pcd_inside = gt_pcd[gt_inside_mask]
+                    pred_pcd_inside = pred_pcd[gt_inside_mask]
+                    root_path = '/'.join(out_path.split('/')[:-1])
+                    mmcv.mkdir_or_exist(root_path)
+                    self._viz_pcd(
+                        pred_pcd_inside.cpu().numpy(),
+                        scene_origin[bs, frame_idx].cpu().numpy()[None, :],
+                        output_path=out_path,
+                        gt_pcd=gt_pcd_inside.cpu().numpy()
+                    )
+
+                if self._submission:
+                    self._save_prediction(pred_pcd, img_metas[bs], frame_idx + 1)
+
+                count += 1
+            ret_dict[f'frame.{frame_name}']['count'] = count
+
+        if self._viz_pcd_flag:
+            print('==== Visualize predicted point clouds done!! End the program. ====')
+            print(f'==== The visualized point clouds are stored at {out_path} ====')
+        return [ret_dict]
