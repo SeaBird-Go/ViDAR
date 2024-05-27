@@ -198,9 +198,10 @@ class ViDARXWorld(BEVFormer):
             batched_input_occs[batched_input_occs == 0] = 12
             batched_input_occs = batched_input_occs - 1
         elif type == 'binary':
-            ## convert the occupancy to binary occupancy
-            batched_input_occs[batched_input_occs != 11] = 0
-            batched_input_occs[batched_input_occs == 11] = 1
+            if not self.load_pred_occ:
+                ## convert the occupancy to binary occupancy
+                batched_input_occs[batched_input_occs != 11] = 0
+                batched_input_occs[batched_input_occs == 11] = 1
         else:
             raise ValueError(f"Unknown input transform type: {type}")
         return batched_input_occs

@@ -94,6 +94,7 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
             for _ in range(batch_size * world_size):
                 prog_bar.update()
 
+    print(f"Collect results from all ranks, current rank: {rank}, world_size: {world_size}")
     # collect results from all ranks
     if gpu_collect:
         bbox_results = collect_results_gpu(bbox_results, len(dataset))
@@ -134,9 +135,13 @@ def collect_results_cpu(result_part, size, tmpdir=None):
         tmpdir = dir_tensor.cpu().numpy().tobytes().decode().rstrip()
     else:
         mmcv.mkdir_or_exist(tmpdir)
+    import time
+    start = time.time()
     # dump the part result to the dir
     mmcv.dump(result_part, osp.join(tmpdir, f'part_{rank}.pkl'))
+    print(f"rank: {rank}, dump time: {time.time()-start}")
     dist.barrier()
+    print(f"rank: {rank}, barrier time: {time.time()-start}")
     # collect all parts
     if rank != 0:
         return None

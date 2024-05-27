@@ -30,7 +30,7 @@ from .vidar import ViDAR
 class ViDARCurrOnly(ViDAR):
     def __init__(self,
                  save_offline=True,
-                 save_root="/data1/cyx/OpenScene/results/vidar_pred_pc_train",
+                 save_root="/data1/cyx/OpenScene/results/vidar_pred_pc_val_debug",
                  *args,
                  **kwargs,):
 
@@ -128,6 +128,7 @@ class ViDARCurrOnly(ViDAR):
             
             pred_pcd = pred_pcd_inside.cpu().numpy()
             np.savez_compressed(save_path, pred_pcd)
+            # np.savetxt(f"{img_metas[0]['sample_idx']}_pred.xyz", pred_pcd)
             return [None]
 
         pred_frame_num = len(pred_pcds[0])

@@ -214,8 +214,8 @@ def check_data_length():
 
 
 if __name__ == "__main__":
-    check_vidar_pred_pc()
-    # rewrite_vidar_pred_pc()
+    # check_vidar_pred_pc()
+    rewrite_vidar_pred_pc()
     exit()
     
 

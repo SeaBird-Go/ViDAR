@@ -358,7 +358,7 @@ data = dict(
              ),
     test=dict(type="NuPlanViDARDatasetV2",
               data_root=data_root,
-              ann_file=train_ann_pickle_root,
+              ann_file=val_ann_pickle_root,
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality,
 
