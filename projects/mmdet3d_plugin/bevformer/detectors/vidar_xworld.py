@@ -82,6 +82,8 @@ class ViDARXWorld(BEVFormer):
                  num_classes=2,
                  patch_size=2,
                  load_pred_occ=False,
+                 pred_occ_is_binary=None,
+                 use_grid_sample=True,
 
                  *args,
                  **kwargs,):
@@ -104,12 +106,11 @@ class ViDARXWorld(BEVFormer):
         self.class_embeds = nn.Embedding(num_classes, expansion)
         self.patch_size = patch_size
 
+        self.use_grid_sample = use_grid_sample
         self.load_pred_occ = load_pred_occ
-        self.use_binary_occ = False
-        if num_classes == 2:
-            # use binary occupancy as inputs
-            self.use_binary_occ = True
-
+        self.pred_occ_is_binary = pred_occ_is_binary
+        self.use_binary_occ = True if num_classes == 2 else False
+        
         out_dim = 32
         self.predicter = nn.Sequential(
                 nn.Linear(expansion, out_dim*2),
@@ -163,71 +164,124 @@ class ViDARXWorld(BEVFormer):
         logits = self.predicter(x)
         return logits
     
-    def transform_inputs(self, batched_input_occs, type='grid_sample'):
-        if type == 'grid_sample':
-            num_frames = self.history_len
+    def grid_sample_inputs(self, batched_input_occs):
+        num_frames = self.history_len
 
-            # grid sample the original occupancy to the target pc range.
-            # generate normalized grid
-            device = batched_input_occs.device
-            x_size = 200
-            y_size = 200
-            z_size = 16
-            x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
-            y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
-            z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
-            grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
+        # grid sample the original occupancy to the target pc range.
+        # generate normalized grid
+        device = batched_input_occs.device
+        x_size = 200
+        y_size = 200
+        z_size = 16
+        x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
+        y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
+        z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
+        grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
 
-            grid[..., 0] = grid[..., 0] * (51.2 / 50)
-            grid[..., 1] = grid[..., 1] * (51.2 / 50)
-            grid[..., 2] = grid[..., 2] - (4 / 16.0)
+        grid[..., 0] = grid[..., 0] * (51.2 / 50)
+        grid[..., 1] = grid[..., 1] * (51.2 / 50)
+        grid[..., 2] = grid[..., 2] - (4 / 16.0)
 
-            # add flow to grid
-            _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
-            _batched_input_occs = _batched_input_occs + 1
+        # add flow to grid
+        _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
+        _batched_input_occs = _batched_input_occs + 1
 
-            bs = _batched_input_occs.shape[0]
-            grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
-            _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
-                                                grid.flip(-1).float(), 
-                                                mode='nearest', 
-                                                padding_mode='zeros',
-                                                align_corners=True)
+        bs = _batched_input_occs.shape[0]
+        grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
+        _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
+                                            grid.flip(-1).float(), 
+                                            mode='nearest', 
+                                            padding_mode='zeros',
+                                            align_corners=True)
 
-            batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
-            batched_input_occs[batched_input_occs == 0] = 12
-            batched_input_occs = batched_input_occs - 1
-        elif type == 'binary':
-            if not self.load_pred_occ:
+        batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
+        batched_input_occs[batched_input_occs == 0] = 12
+        batched_input_occs = batched_input_occs - 1
+        return batched_input_occs
+    
+    def get_batched_inputs(self, input_occs):
+        """From the input occupancy to the batched input occupancy.
+
+        Args:
+            input_occs (_type_): the input occupancy if a list with shape (F, N, 2)
+
+        Returns:
+            _type_: # (bs, F, H, W, D)
+        """
+        batched_input_occs = []
+        for bs in range(len(input_occs)):
+            next_occs = []
+            cur_occ = input_occs[bs]
+            for _occ in cur_occ:
+                next_occs.append(occ_to_voxel(_occ))
+            batched_input_occs.append(torch.stack(next_occs, 0))
+        batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
+        return batched_input_occs
+    
+    def get_occ_inputs(self, input_occs):
+        if self.training:
+            # when training, we assume the input occupancy is always semantic occupancy
+            batched_input_occs = self.get_batched_inputs(input_occs)
+
+            if self.use_grid_sample:
+                batched_input_occs = self.grid_sample_inputs(batched_input_occs)
+            
+            if self.use_binary_occ:
                 ## convert the occupancy to binary occupancy
                 batched_input_occs[batched_input_occs != 11] = 0
                 batched_input_occs[batched_input_occs == 11] = 1
         else:
-            raise ValueError(f"Unknown input transform type: {type}")
-        return batched_input_occs
-    
-    def get_occ_inputs(self, input_occs):
-        ## convert the raw occ_gts into to occupancy
-        if self.training or not self.load_pred_occ:
-            batched_input_occs = []
-            for bs in range(len(input_occs)):
-                next_occs = []
-                cur_occ = input_occs[bs]
-                for _occ in cur_occ:
-                    next_occs.append(occ_to_voxel(_occ))
-                batched_input_occs.append(torch.stack(next_occs, 0))
-            batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
-        else:
-            # if load the predicted occupancy, 
-            # the occupancy is already with the shape of (bs, F, H, W, D)
-            batched_input_occs = input_occs.long()
+            if self.load_pred_occ:
+                # if load the predicted occupancy by other methods, 
+                # we assume the occupancy is already with the shape of (bs, F, H, W, D)
+                batched_input_occs = input_occs.long()
 
-        if self.use_binary_occ:
-            batched_input_occs = self.transform_inputs(
-                batched_input_occs, type='binary')
-        else:
-            batched_input_occs = self.transform_inputs(
-                batched_input_occs, type='grid_sample')
+                assert self.pred_occ_is_binary is not None, \
+                    'You must specify the pred_occ_is_binary when loading the predicted occupancy.'
+                
+                if self.pred_occ_is_binary:
+                    assert not self.use_grid_sample, 'The grid sample is not supported for binary occupancy for now.'
+                    assert self.use_binary_occ, 'You can only use binary occupancy as inputs when the predicted occ is binary.'
+                else:
+                    if self.use_grid_sample:
+                        batched_input_occs = self.grid_sample_inputs(batched_input_occs)
+                    
+                    if self.use_binary_occ:
+                        ## convert the occupancy to binary occupancy
+                        batched_input_occs[batched_input_occs != 11] = 0
+                        batched_input_occs[batched_input_occs == 11] = 1
+            else:
+                batched_input_occs = self.get_batched_inputs(input_occs)
+
+                if self.use_grid_sample:
+                    batched_input_occs = self.grid_sample_inputs(batched_input_occs)
+                if self.use_binary_occ:
+                    ## convert the occupancy to binary occupancy
+                    batched_input_occs[batched_input_occs != 11] = 0
+                    batched_input_occs[batched_input_occs == 11] = 1
+            
+        # ## convert the raw occ_gts into to occupancy
+        # if self.training or not self.load_pred_occ:
+        #     batched_input_occs = []
+        #     for bs in range(len(input_occs)):
+        #         next_occs = []
+        #         cur_occ = input_occs[bs]
+        #         for _occ in cur_occ:
+        #             next_occs.append(occ_to_voxel(_occ))
+        #         batched_input_occs.append(torch.stack(next_occs, 0))
+        #     batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
+        # else:
+        #     # if load the predicted occupancy, 
+        #     # the occupancy is already with the shape of (bs, F, H, W, D)
+        #     batched_input_occs = input_occs.long()
+
+        # if self.use_grid_sample:
+        #     batched_input_occs = self.grid_sample_inputs(batched_input_occs)
+
+        # if self.use_binary_occ and not self.load_pred_occ:
+        #     ## convert the occupancy to binary occupancy
+        #     batched_input_occs[batched_input_occs != 11] = 0
+        #     batched_input_occs[batched_input_occs == 11] = 1
         return batched_input_occs
     
     @auto_fp16(apply_to=('img', 'points'))
@@ -256,57 +310,7 @@ class ViDARXWorld(BEVFormer):
         """
         num_frames = self.history_len
 
-        ## convert the raw occ_gts into to occupancy
-        batched_input_occs = []
-        for bs in range(len(input_occs)):
-            next_occs = []
-            cur_occ = input_occs[bs]
-            for _occ in cur_occ:
-                next_occs.append(occ_to_voxel(_occ))
-            batched_input_occs.append(torch.stack(next_occs, 0))
-        batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
-
-        if self.use_binary_occ:
-            batched_input_occs = self.transform_inputs(
-                batched_input_occs, type='binary')
-        else:
-            batched_input_occs = self.transform_inputs(
-                batched_input_occs, type='grid_sample')
-
-        ## convert the occupancy to binary occupancy
-        # batched_input_occs[batched_input_occs != 11] = 0
-        # batched_input_occs[batched_input_occs == 11] = 1
-
-        # grid sample the original occupancy to the target pc range.
-        # generate normalized grid
-        # device = batched_input_occs.device
-        # x_size = 200
-        # y_size = 200
-        # z_size = 16
-        # x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
-        # y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
-        # z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
-        # grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
-
-        # grid[..., 0] = grid[..., 0] * (51.2 / 50)
-        # grid[..., 1] = grid[..., 1] * (51.2 / 50)
-        # grid[..., 2] = grid[..., 2] - (4 / 16.0)
-
-        # # add flow to grid
-        # _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
-        # _batched_input_occs = _batched_input_occs + 1
-
-        # bs = _batched_input_occs.shape[0]
-        # grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
-        # _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
-        #                                     grid.flip(-1).float(), 
-        #                                     mode='nearest', 
-        #                                     padding_mode='zeros',
-        #                                     align_corners=True)
-
-        # batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
-        # batched_input_occs[batched_input_occs == 0] = 12
-        # batched_input_occs = batched_input_occs - 1
+        batched_input_occs = self.get_occ_inputs(input_occs)
 
         # Preprocess the historical occupancy
         x = self.preprocess(batched_input_occs)
@@ -340,7 +344,6 @@ class ViDARXWorld(BEVFormer):
         next_bev_preds = self.post_process(next_bev_preds)  # (bs, F, X, Y, Z, c)
         next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> b f c y x z')
         next_bev_preds = rearrange(next_bev_preds, 'b f c y x z -> (b f) c () () (y x) z')
-        # next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> (b f) c () () (x y) z')
 
         # next_bev_preds = rearrange(next_bev_preds, 'b f h w d c -> b f (h w d) c')
         pred_dict = {
@@ -372,62 +375,7 @@ class ViDARXWorld(BEVFormer):
 
         self.eval()
 
-        if not self.load_pred_occ:
-            ## convert the raw occ_gts into to occupancy
-            batched_input_occs = []
-            for bs in range(len(input_occs)):
-                next_occs = []
-                cur_occ = input_occs[bs]
-                for _occ in cur_occ:
-                    next_occs.append(occ_to_voxel(_occ))
-                batched_input_occs.append(torch.stack(next_occs, 0))
-            batched_input_occs = torch.stack(batched_input_occs, 0)  # (bs, F, H, W, D)
-
-            # ## convert the occupancy to binary occupancy
-            # batched_input_occs[batched_input_occs != 11] = 0
-            # batched_input_occs[batched_input_occs == 11] = 1  # free voxels
-        else:
-            # if load the predicted occupancy, 
-            # the occupancy is already with the shape of (bs, F, H, W, D)
-            batched_input_occs = input_occs.long()
-
-        if self.use_binary_occ:
-            batched_input_occs = self.transform_inputs(
-                batched_input_occs, type='binary')
-        else:
-            batched_input_occs = self.transform_inputs(
-                batched_input_occs, type='grid_sample')
-
-        # grid sample the original occupancy to the target pc range.
-        # generate normalized grid
-        # device = batched_input_occs.device
-        # x_size = 200
-        # y_size = 200
-        # z_size = 16
-        # x = torch.linspace(-1.0, 1.0, x_size).view(-1, 1, 1).repeat(1, y_size, z_size).to(device)
-        # y = torch.linspace(-1.0, 1.0, y_size).view(1, -1, 1).repeat(x_size, 1, z_size).to(device)
-        # z = torch.linspace(-1.0, 1.0, z_size).view(1, 1, -1).repeat(x_size, y_size, 1).to(device)
-        # grid = torch.cat([x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)], dim=-1)
-
-        # grid[..., 0] = grid[..., 0] * (51.2 / 50)
-        # grid[..., 1] = grid[..., 1] * (51.2 / 50)
-        # grid[..., 2] = grid[..., 2] - (4 / 16.0)
-
-        # # add flow to grid
-        # _batched_input_occs = rearrange(batched_input_occs, 'b f h w d -> (b f) () h w d')
-        # _batched_input_occs = _batched_input_occs + 1
-
-        # bs = _batched_input_occs.shape[0]
-        # grid = grid.unsqueeze(0).expand(bs, -1, -1, -1, -1)
-        # _batched_input_occs = F.grid_sample(_batched_input_occs.float(), 
-        #                                     grid.flip(-1).float(), 
-        #                                     mode='nearest', 
-        #                                     padding_mode='zeros',
-        #                                     align_corners=True)
-
-        # batched_input_occs = rearrange(_batched_input_occs.long(), '(b f) () h w d -> b f h w d', f=num_frames)
-        # batched_input_occs[batched_input_occs == 0] = 12
-        # batched_input_occs = batched_input_occs - 1
+        batched_input_occs = self.get_occ_inputs(input_occs)
 
         # Preprocess the historical occupancy
         x = self.preprocess(batched_input_occs)
@@ -443,7 +391,6 @@ class ViDARXWorld(BEVFormer):
         next_bev_preds = self.post_process(next_bev_preds)  # (bs, F, X, Y, Z, c)
         next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> b f c y x z')
         next_bev_preds = rearrange(next_bev_preds, 'b f c y x z -> (b f) c () () (y x) z')
-        # next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> (b f) c () () (x y) z')
 
         pred_dict = {
             'next_bev_features': next_bev_feats,
@@ -757,7 +704,7 @@ class ViDARXWorldWithFlow(ViDARXWorld):
             img_metas=img_metas, suffix='coarse')
         
         for key, value in coarse_loss_dict.items():
-            coarse_loss_dict[key] = value * 0.1
+            coarse_loss_dict[key] = value * 0.5
         losses.update(coarse_loss_dict)
 
         return losses

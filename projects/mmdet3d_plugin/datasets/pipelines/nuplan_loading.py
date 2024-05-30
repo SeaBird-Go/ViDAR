@@ -202,7 +202,12 @@ class LoadNuPlanPointsFromFile(object):
         Returns:
             np.ndarray: An array containing point clouds data.
         """
-        pc = PointCloud.parse_from_file(pts_filename).to_pcd_bin2().T
+        if pts_filename.endswith(".pcd"):
+            pc = PointCloud.parse_from_file(pts_filename).to_pcd_bin2().T
+        elif pts_filename.endswith(".npz"):
+            pc = np.load(pts_filename)['arr_0']
+        else:
+            raise NotImplementedError
         return pc
 
     def __call__(self, results):
@@ -335,13 +340,8 @@ class LoadOccupancyGT(object):
 
             occ_preds = np.load(occ_pred_path)['arr_0']  # (x, y, z)
             if self.pred_occ_is_binary:
-                if self.use_binary_occ_inputs:
-                    occ_preds = 1 - occ_preds  # make 1 is free
-                else:
-                    raise ValueError("You have specify the predicted occupancy is binary")
-            else:
-                if self.use_binary_occ_inputs:
-                    occ_preds[occ_preds != 11] = 0
-                    occ_preds[occ_preds == 11] = 1
+                assert self.use_binary_occ_inputs, \
+                    "The predicted occupancy is binary, but we are not using binary occupancy as model inputs."
+                occ_preds = 1 - occ_preds  # make 1 is free
             results['occ_preds'] = torch.from_numpy(occ_preds)
         return results

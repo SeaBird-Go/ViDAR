@@ -14,7 +14,9 @@ import os.path as osp
 import numpy as np
 import torch
 import os, sys
-import tqdm
+from tqdm import tqdm
+import pickle
+
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 
@@ -120,21 +122,26 @@ def add_occ_path():
 def remove_data_wo_occ_path():
     """Because the original data has some missing occ_gt_final_path, we need to remove them.
     """
+    # data_part = 'mini'
+    data_part = "trainval"
+
     for split in ['train', 'val']:
-        val_pkl_fp = f"data/openscene-v1.1/openscene_mini_{split}.pkl"
-        val_meta = mmengine.load(val_pkl_fp)
-        print("split:", split, type(val_meta), len(val_meta))
+        val_pkl_fp = f"data/openscene-v1.1/openscene_{data_part}_{split}.pkl"
+        meta = mmengine.load(val_pkl_fp)
+        print("split:", split, type(meta), len(meta))
 
         ## check the occ
         new_val_infos = []
-        for info in val_meta:
+        for info in tqdm(meta):
             occ_gt_path = info['occ_gt_final_path']
             if occ_gt_path is None:
                 continue
             new_val_infos.append(info)
         print(len(new_val_infos))
 
-        mmengine.dump(new_val_infos, f"data/openscene-v1.1/openscene_mini_{split}_v2.pkl")
+        mmengine.dump(new_val_infos, 
+                      f"data/openscene-v1.1/openscene_{data_part}_{split}_v2.pkl",
+                      protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":

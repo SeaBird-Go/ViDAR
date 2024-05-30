@@ -6,13 +6,14 @@ Date: 2024-04-15 15:14:22
 Email: haimingzhang@link.cuhk.edu.cn
 Description: 
 '''
-
+import time
 import mmengine
 import os
 from tqdm import tqdm
 import os.path as osp
 import numpy as np
 from collections import defaultdict, OrderedDict
+import pickle
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 
@@ -177,10 +178,72 @@ def check_vidar_pred_pc():
             break
 
 
-def check_data_length():
-    pkl_fp = "data/openscene-v1.1/openscene_mini_train.pkl"
+def load_lidar_pc():
+    from projects.mmdet3d_plugin.datasets.pipelines.nuplan_loading import PointCloud
+    from projects.mmdet3d_plugin.bevformer.utils import e2e_predictor_utils
+
+    min_lidar_fp = "data/openscene-v1.1/sensor_blobs/mini/2021.05.12.22.28.35_veh-35_00620_01164/MergedPointCloud/00a0fec4c02f5f05.pcd"
+    train_lidar_fp = "data/openscene-v1.1/sensor_blobs/trainval/2021.05.12.22.28.35_veh-35_00620_01164/MergedPointCloud/00a0fec4c02f5f05.pcd"
+    
+    iters = 200
+    
+    total_time = 0.0
+    for i in tqdm(range(iters)):
+        start = time.time()
+        pc = PointCloud.parse_from_file(min_lidar_fp).to_pcd_bin2().T
+        end = time.time()
+        elapsed = end - start
+        total_time += elapsed
+    print("Mini Average time taken: ", total_time / iters)
+
+    total_time = 0.0
+    for i in tqdm(range(iters)):
+        start = time.time()
+        pc = PointCloud.parse_from_file(train_lidar_fp).to_pcd_bin2().T
+        end = time.time()
+        elapsed = end - start
+        total_time += elapsed
+    print("Train Average time taken: ", total_time / iters)
+
+    total_time = 0.0
+    for i in tqdm(range(iters)):
+        start = time.time()
+        pc = np.load("pcccc.npz")['arr_0']
+        end = time.time()
+        elapsed = end - start
+        total_time += elapsed
+    print("NPZ Average time taken: ", total_time / iters)
+
+    return
+
+    point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+
+    data_part = 'trainval'
+    pkl_fp = f"data/openscene-v1.1/openscene_{data_part}_train.pkl"
     pkl_fp = "data/openscene-v1.1/openscene_mini_train_v2.pkl"
     # pkl_fp = "data/openscene-v1.1/openscene_mini_val_v2.pkl"
+
+    data_infos = mmengine.load(pkl_fp)
+    print(type(data_infos), len(data_infos))
+    print(data_infos[0].keys())
+
+    data_root = f"data/openscene-v1.1/sensor_blobs/{data_part}"
+
+    info = data_infos[10]
+    lidar_path = info['lidar_path']
+    pts_filename = osp.join(data_root, lidar_path)
+    
+    start = time.time()
+    pc = PointCloud.parse_from_file(pts_filename).to_pcd_bin2().T
+    print(f"Time cost: {time.time() - start:.7f}s")
+    print(pc.shape)
+
+
+def check_data_length():
+    data_part = 'trainval'
+    pkl_fp = "data/openscene-v1.1/openscene_mini_train.pkl"
+    # pkl_fp = f"data/openscene-v1.1/openscene_{data_part}_train_v2.pkl"
+    pkl_fp = "data/openscene-v1.1/openscene_mini_train_v2.pkl"
 
     data_infos = mmengine.load(pkl_fp)
     print(type(data_infos), len(data_infos))
@@ -196,30 +259,34 @@ def check_data_length():
 
     num_frames_each_scene = [len(_scene) for _scene in data_infos_dict.values()]
     print(min(num_frames_each_scene), max(num_frames_each_scene))
-    print(sorted(num_frames_each_scene))
+    print(sorted(num_frames_each_scene)[:100])
 
     filtered_scene_names = []
     for key, value in data_infos_dict.items():
-        # filter the scenes with less than 8 frames
-        if len(value) < 8:
+        # filter the scenes with less than 12 frames
+        if len(value) < 12:
             continue
         filtered_scene_names.append(key)
 
     # only keep the first 1/4 for acceleration
-    partial_filtered_scene_names = filtered_scene_names[:len(filtered_scene_names) // 4]
     filtered_data_infos = []
-    for key in partial_filtered_scene_names:
+    for key in filtered_scene_names:
         filtered_data_infos.extend(data_infos_dict[key])
-    print(len(filtered_data_infos))
+    print(f"Filtered data length: {len(filtered_data_infos)}")
+
+    pkl_file_path = f"data/openscene-v1.1/openscene_{data_part}_train_v2_filter.pkl"
+    with open(pkl_file_path, "wb") as f:
+        pickle.dump(filtered_data_infos, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":
+    load_lidar_pc()
     # check_vidar_pred_pc()
-    rewrite_vidar_pred_pc()
+    # rewrite_vidar_pred_pc()
     exit()
     
 
-    # check_data_length()
+    
     # check_private_wm_data()
 
 

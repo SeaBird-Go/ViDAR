@@ -26,6 +26,46 @@ from ..utils import e2e_predictor_utils, eval_utils
 from .vidar import ViDAR
 
 
+def merge_close_vectors_kd_tree(vectors, threshold=0.1):
+  """使用 KD 树合并相近的单位方向向量。
+
+  Args:
+    vectors: Nx3 的单位方向向量数组。
+    threshold: 向量夹角的余弦值阈值，小于该阈值则认为两个向量相近。
+
+  Returns:
+    Mx3 的合并后的单位方向向量数组。
+  """
+  from sklearn.neighbors import KDTree
+
+  # 创建 KD 树
+  tree = KDTree(vectors)
+
+  # 初始化合并后的向量列表
+  merged_vectors = []
+  merged = set()
+
+  # 遍历所有向量
+  for i in range(len(vectors)):
+    # 如果当前向量已被合并，则跳过
+    if i in merged:
+      continue
+
+    # 使用 KD 树搜索与当前向量夹角余弦值大于阈值的近邻向量
+    close_vectors = tree.query_radius(vectors[i].reshape(1, -1), r=np.arccos(threshold), return_distance=False)[0]
+
+    # 将当前向量和所有与之相近的向量合并
+    merged_vectors.append(np.mean(vectors[close_vectors], axis=0))
+
+    # 将这些向量标记为已合并
+    merged.update(close_vectors)
+
+  # 将合并后的向量归一化
+  merged_vectors = np.array(merged_vectors)
+  merged_vectors = merged_vectors / np.linalg.norm(merged_vectors, axis=1, keepdims=True)
+
+  return merged_vectors
+
 @DETECTORS.register_module()
 class ViDARCurrOnly(ViDAR):
     def __init__(self,
