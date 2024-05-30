@@ -2,9 +2,9 @@
 Copyright (c) 2024 by Haiming Zhang. All Rights Reserved.
 
 Author: Haiming Zhang
-Date: 2024-04-23 16:01:13
+Date: 2024-05-28 11:54:01
 Email: haimingzhang@link.cuhk.edu.cn
-Description: Use the XWorld for future forecasting.
+Description: Train the XWorld ViDAR with flow in the full trainval dataset.
 '''
 _base_ = [
     '../../_base_/default_runtime.py'
@@ -73,13 +73,20 @@ queue_length = 5 # each sequence contains `queue_length` frames.
 
 expansion = 8
 model = dict(
-    type='ViDARXWorld',
+    type='ViDARXWorldWithFlow',
     num_classes=12,
-    use_grid_sample=False,
+    pred_abs_flow=True,
     history_len=queue_length + 1,
     use_grid_mask=True,
     video_test_mode=True,
     supervise_all_future=supervise_all_future,
+
+    refine_decoder=dict(
+        type='SimVP',
+        shape_in=(6, 128, 200, 200),
+        hid_S=16,
+        groups=4,
+    ),
 
     # BEV configuration.
     point_cloud_range=point_cloud_range,
@@ -173,10 +180,10 @@ model = dict(
             pc_range=point_cloud_range))))
 
 dataset_type = 'NuPlanXWorldDataset'
-data_split = 'mini'
+data_split = 'trainval'
 data_root = f'data/openscene-v1.1/sensor_blobs/{data_split}'
 train_ann_pickle_root = f'data/openscene-v1.1/openscene_{data_split}_train_v2.pkl'
-val_ann_pickle_root = f'data/openscene-v1.1/openscene_{data_split}_val_v2.pkl'
+val_ann_pickle_root = f'data/openscene-v1.1/openscene_mini_val_v2.pkl'  # NOTE: for quick loading
 file_client_args = dict(backend='disk')
 
 train_pipeline = [
@@ -295,4 +302,4 @@ log_config = dict(
         dict(type='TensorboardLoggerHook')
     ])
 
-checkpoint_config = dict(interval=1, max_keep_ckpts=5)
+checkpoint_config = dict(interval=1, max_keep_ckpts=10)

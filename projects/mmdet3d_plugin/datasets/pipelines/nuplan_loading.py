@@ -202,7 +202,12 @@ class LoadNuPlanPointsFromFile(object):
         Returns:
             np.ndarray: An array containing point clouds data.
         """
-        pc = PointCloud.parse_from_file(pts_filename).to_pcd_bin2().T
+        if pts_filename.endswith(".pcd"):
+            pc = PointCloud.parse_from_file(pts_filename).to_pcd_bin2().T
+        elif pts_filename.endswith(".npz"):
+            pc = np.load(pts_filename)['arr_0']
+        else:
+            raise NotImplementedError
         return pc
 
     def __call__(self, results):
@@ -296,8 +301,21 @@ class LoadNuPlanPointsFromMultiSweeps(LoadPointsFromMultiSweeps):
 class LoadOccupancyGT(object):
     def __init__(self, 
                  load_pred_occ=False,
+                 pred_occ_is_binary=True,
+                 use_binary_occ_inputs=True,
                  pred_occ_root_dir=None):
+        """Load occupancy.
+
+        Args:
+            load_pred_occ (Bool, optional): Whether we need to load predicted occupancy rather 
+                than the occupancy GT. Defaults to False.
+            pred_occ_is_binary (bool, optional): The predicted occupancy is binary already or not. Defaults to True.
+            use_binary_occ_inputs (bool, optional): We wish to use binary occupancy as inputs or not. Defaults to True.
+            pred_occ_root_dir (_type_, optional): The predicted occupancy location path. Defaults to None.
+        """
         self.load_pred_occ = load_pred_occ
+        self.pred_occ_is_binary = pred_occ_is_binary
+        self.use_binary_occ_inputs = use_binary_occ_inputs
         if self.load_pred_occ:
             assert pred_occ_root_dir is not None, \
                 "pred_occ_root_dir should be provided if load_pred_occ is True"
@@ -321,6 +339,9 @@ class LoadOccupancyGT(object):
             occ_pred_path += ".npz"
 
             occ_preds = np.load(occ_pred_path)['arr_0']  # (x, y, z)
-            occ_preds = 1 - occ_preds  # make 1 is free
+            if self.pred_occ_is_binary:
+                assert self.use_binary_occ_inputs, \
+                    "The predicted occupancy is binary, but we are not using binary occupancy as model inputs."
+                occ_preds = 1 - occ_preds  # make 1 is free
             results['occ_preds'] = torch.from_numpy(occ_preds)
         return results

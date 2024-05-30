@@ -222,6 +222,7 @@ class XWorldHead(ViDARHeadBase):
              tgt_pc_range,
              pred_frame_num,
              img_metas=None,
+             suffix='',
              batched_origin_points=None):
         """"Compute loss for all history according to gt_points.
 
@@ -280,7 +281,7 @@ class XWorldHead(ViDARHeadBase):
             cur_frame_loss_weight = self.per_frame_loss_weight[i]
             cur_frame_loss_weight = cur_frame_loss_weight * (idx == i)
             for k, v in cur_loss_dict.items():
-                loss_dict.update({f'frame.{idx}.{k}.loss': v * cur_frame_loss_weight})
+                loss_dict.update({f'{suffix}frame.{idx}.{k}.loss': v * cur_frame_loss_weight})
         return loss_dict
 
     @force_fp32(apply_to=('pred_dict'))

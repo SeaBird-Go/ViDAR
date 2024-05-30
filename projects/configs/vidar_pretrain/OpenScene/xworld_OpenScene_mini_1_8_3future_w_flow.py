@@ -2,9 +2,9 @@
 Copyright (c) 2024 by Haiming Zhang. All Rights Reserved.
 
 Author: Haiming Zhang
-Date: 2024-04-23 16:01:13
+Date: 2024-05-09 15:42:24
 Email: haimingzhang@link.cuhk.edu.cn
-Description: Use the XWorld for future forecasting.
+Description: Add the flow information.
 '''
 _base_ = [
     '../../_base_/default_runtime.py'
@@ -73,13 +73,20 @@ queue_length = 5 # each sequence contains `queue_length` frames.
 
 expansion = 8
 model = dict(
-    type='ViDARXWorld',
+    type='ViDARXWorldWithFlow',
     num_classes=12,
-    use_grid_sample=False,
+    pred_abs_flow=True,
     history_len=queue_length + 1,
     use_grid_mask=True,
     video_test_mode=True,
     supervise_all_future=supervise_all_future,
+
+    refine_decoder=dict(
+        type='SimVP',
+        shape_in=(6, 128, 200, 200),
+        hid_S=16,
+        groups=4,
+    ),
 
     # BEV configuration.
     point_cloud_range=point_cloud_range,
