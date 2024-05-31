@@ -25,6 +25,7 @@ from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
 from projects.mmdet3d_plugin.bevformer.dense_heads.mimo_modules import preprocess
 from .bevformer import BEVFormer
 from mmdet3d.models import builder
+from projects.mmdet3d_plugin.bevformer.losses.lovasz_loss import lovasz_softmax
 from mmengine.registry import MODELS
 from ..utils import e2e_predictor_utils, eval_utils
 from ..utils.occ_utils import occ_to_voxel
@@ -102,6 +103,7 @@ class ViDARXWorld(BEVFormer):
         self.bev_h = bev_h
         self.bev_w = bev_w
 
+        self.num_classes = num_classes
         self.expansion = expansion
         self.class_embeds = nn.Embedding(num_classes, expansion)
         self.patch_size = patch_size
@@ -861,3 +863,113 @@ class ViDARXWorldWithFlow(ViDARXWorld):
             print('==== Visualize predicted point clouds done!! End the program. ====')
             print(f'==== The visualized point clouds are stored at {out_path} ====')
         return [ret_dict]
+    
+
+
+@DETECTORS.register_module()
+class XWorldOccWithFlow(ViDARXWorldWithFlow):
+    """Use XWorld to predict the occupancy rather than the point cloud
+
+    Args:
+        ViDARXWorldWithFlow (_type_): _description_
+    """
+    def __init__(self,
+                 **kwargs):
+        super().__init__(**kwargs)
+
+        out_dim = 32
+        self.predicter = nn.Sequential(
+            nn.Linear(self.expansion, out_dim*2),
+            nn.Softplus(),
+            nn.Linear(out_dim*2, self.num_classes),
+        )
+        self.predicter2 = nn.Sequential(
+            nn.Linear(self.expansion, out_dim*2),
+            nn.Softplus(),
+            nn.Linear(out_dim*2, self.num_classes),
+        )
+
+    @auto_fp16(apply_to=('img', 'points'))
+    def forward_train(self,
+                      input_occs=None,
+                      img_metas=None,
+                      img=None,
+                      target_occs=None,
+                      **kwargs,
+                      ):
+        num_frames = self.history_len
+
+        batched_input_occs = self.get_occ_inputs(input_occs)
+
+        # Preprocess the historical occupancy
+        x = self.preprocess(batched_input_occs)
+
+        # forecasting the future occupancy
+        bev_flow_pred, input_feats = self.future_pred_head.forward_head(
+            x, return_encoder_feat=True, **kwargs)
+        bev_flow_pred = self.predict_bev_flow(bev_flow_pred)
+
+        ## warp the current occupancy map using the predicted flow
+        # bev_flow_pred = rearrange(bev_flow_pred, 'b f h w dim2 -> (b f) h w dim2')
+        curr_bev_feat = self.extract_curr_bev_feat(input_feats)
+
+        curr_ego_to_future_ego_trans = None
+        if self.pred_abs_flow:
+            metas = [each[num_frames-1] for each in img_metas]
+
+            curr_ego_to_future_ego_list = []
+            for meta in metas:
+                curr_ego_to_future_ego = torch.from_numpy(meta['curr_ego_to_future_ego']).to(x.device)
+                curr_ego_to_future_ego_list.append(curr_ego_to_future_ego.to(torch.float32))
+
+            curr_ego_to_future_ego_trans = torch.stack(curr_ego_to_future_ego_list, dim=0)  # (bs, num_pred, 4, 4)
+        
+        if self.pred_abs_flow:
+            warped_predicted_occ = warp_bev_features(
+                curr_bev_feat, 
+                bev_flow_pred, 
+                voxel_size=torch.Tensor([51.2 * 2 / 200.0, 51.2 * 2 / 200.0]), 
+                occ_size=torch.Tensor([200.0, 200.0]),
+                curr_ego_to_future_ego=curr_ego_to_future_ego_trans)
+        else:
+            raise ValueError('Only support absolute flow prediction for now.')
+        
+        coarse_logits = self.get_coarse_occ(warped_predicted_occ)
+
+        refined_occ = self.refine_decoder(warped_predicted_occ)
+        refined_logits = self.post_process2(refined_occ) # (bs, F, X, Y, Z, c)
+
+        ## compute the loss
+        losses = dict()
+        
+        target_occs = self.get_batched_inputs(target_occs)
+
+        coarse_loss_dict = self.compute_loss(
+            coarse_logits, target_occs, suffix='coarse')
+        for key, value in coarse_loss_dict.items():
+            coarse_loss_dict[key] = value * 0.5
+        losses.update(coarse_loss_dict)
+
+        refine_loss = self.compute_loss(
+            refined_logits, target_occs, suffix='refine')
+        losses.update(refine_loss)
+        return losses
+
+    
+    def compute_loss(self, pred_occ, target_occ, suffix=''):
+        loss_dict = dict()
+
+        # 1) compute the reconstruction loss
+        rec_loss = 10.0 * F.cross_entropy(
+            pred_occ.permute(0, 5, 1, 2, 3, 4), 
+            target_occ)
+        loss_dict[f'{suffix}rec_loss'] = rec_loss
+        
+        # 2) compute the LovaszLoss
+        pred_occ = pred_occ.flatten(0, 1).permute(0, 4, 1, 2, 3).softmax(dim=1)
+        target_occ = target_occ.flatten(0, 1)
+        lovasz_loss = lovasz_softmax(pred_occ, target_occ)
+        loss_dict[f'{suffix}lovasz_loss'] = lovasz_loss
+        return loss_dict
+
+
