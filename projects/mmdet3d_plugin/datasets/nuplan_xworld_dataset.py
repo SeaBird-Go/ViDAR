@@ -27,10 +27,12 @@ class NuPlanXWorldDataset(NuPlanViDARDatasetV1):
     """
     def __init__(self,
                  use_img=True,
+                 use_future_occ_gts=False,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.use_img = use_img
+        self.use_future_occ_gts = use_future_occ_gts
 
     def union2one(self, previous_queue, future_queue):
         # 1. get transformation from all frames to current (reference) frame
@@ -224,6 +226,8 @@ class NuPlanXWorldDataset(NuPlanViDARDatasetV1):
 
                 input_occs_list = [each['occ_gts'] for each in previous_queue] 
                 ret_queue['input_occs'] = DC(input_occs_list, cpu_only=False)
+                ret_queue.pop('occ_gts')
+            
             if 'flow_gts' in future_queue[-1]:
                 flow_gt_list = [each['flow_gts'] for each in future_queue] 
                 ret_queue['flow_gts'] = DC(flow_gt_list, cpu_only=False)
@@ -233,6 +237,12 @@ class NuPlanXWorldDataset(NuPlanViDARDatasetV1):
                 ret_queue['input_occs'] = DC(torch.stack(input_occs_list), 
                                              cpu_only=False,
                                              stack=True)
+
+            if self.use_future_occ_gts:
+                assert 'occ_gts' in future_queue[-1]
+
+                occ_gt_list = [each['occ_gts'] for each in future_queue[1:]] 
+                ret_queue['target_occs'] = DC(occ_gt_list, cpu_only=False)
 
         if len(future_can_bus) < 1 + self.future_length:
             return None
