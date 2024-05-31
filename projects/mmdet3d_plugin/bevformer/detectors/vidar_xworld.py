@@ -928,7 +928,7 @@ class XWorldOccWithFlow(ViDARXWorldWithFlow):
             warped_predicted_occ = warp_bev_features(
                 curr_bev_feat, 
                 bev_flow_pred, 
-                voxel_size=torch.Tensor([51.2 * 2 / 200.0, 51.2 * 2 / 200.0]), 
+                voxel_size=torch.Tensor([50.0 * 2 / 200.0, 50.0 * 2 / 200.0]), 
                 occ_size=torch.Tensor([200.0, 200.0]),
                 curr_ego_to_future_ego=curr_ego_to_future_ego_trans)
         else:

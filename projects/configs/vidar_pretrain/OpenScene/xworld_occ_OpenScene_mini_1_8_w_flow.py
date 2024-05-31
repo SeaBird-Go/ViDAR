@@ -15,7 +15,7 @@ plugin_dir = 'projects/mmdet3d_plugin/'
 
 # If point cloud range is changed, the models should also change their point
 # cloud range accordingly
-point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+point_cloud_range = [-50.0, -50.0, -4.0, 50.0, 50.0, 4.0]
 voxel_size = [0.2, 0.2, 8]
 
 # Dataloader.

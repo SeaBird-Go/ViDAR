@@ -279,8 +279,49 @@ def check_data_length():
         pickle.dump(filtered_data_infos, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+def get_scene_list(data_infos, scene_flag="scene_name"):
+    # convert the list of dict to dict
+    data_infos_dict = defaultdict(list)
+    for d in data_infos:
+        data_infos_dict[d[scene_flag]].append(d)
+
+    data_infos_dict = dict(data_infos_dict)
+    print(f"scene numbers: {len(data_infos_dict)}")
+
+    return data_infos_dict
+
+
+def save_partial_data(data_part, split):
+    pkl_fp = f"data/openscene-v1.1/openscene_{data_part}_{split}_v2.pkl"
+    print(pkl_fp)
+
+    meta = mmengine.load(pkl_fp)
+    print(type(meta), len(meta))
+
+    scene_infos_list = get_scene_list(meta, scene_flag='scene_token')
+    print(len(scene_infos_list))
+    for scene_info, data in scene_infos_list.items():
+        print(scene_info, len(data))
+
+    ## only keep the scene with more than 10 data
+    keep_length = 5000
+    kept_data_infos = []
+    for scene_info, data in scene_infos_list.items():
+        if len(data) > 10:
+            kept_data_infos.extend(data)
+        
+        if len(kept_data_infos) > keep_length:
+            break
+    
+    print(len(kept_data_infos))
+    save_pkl_fp = f"data/openscene-v1.1/openscene_{data_part}_{split}_valid.pkl"
+    with open(save_pkl_fp, "wb") as f:
+        pickle.dump(kept_data_infos, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
 if __name__ == "__main__":
-    load_lidar_pc()
+    # load_lidar_pc()
+    save_partial_data('trainval', 'val')
     # check_vidar_pred_pc()
     # rewrite_vidar_pred_pc()
     exit()
