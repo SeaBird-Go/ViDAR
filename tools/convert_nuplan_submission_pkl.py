@@ -10,10 +10,10 @@ dst_path = sys.argv[2]  # path/to/your/submission.pkl
 #  Corresponding information.
 sv_pkl = dict(
     method="XWorld",
-    team="Huawei Noah's Ark Lab",
-    authors="Haiming Zhang, Xu Yan, Ying Xue, Zixuan Guo, Bingbing Liu, Zhen Li",
+    team="Huawei-Noah & CUHK-SZ",
+    authors="Haiming Zhang, Xu Yan, Ying Xue, Zixuan Guo, Zhen Li, Bingbing Liu",
     email="haimingzhang@link.cuhk.edu.cn",
-    institution="The Chinese University of Hong Kong (Shenzhen), Huawei Noah's Ark Lab",
+    institution="The Chinese University of Hong Kong (Shenzhen), Huawei Noah's Ark Lab, The Chinese University of Hong Kong (Shenzhen), Huawei Noah's Ark Lab, The Chinese University of Hong Kong (Shenzhen), Huawei Noah's Ark Lab",
     country="China",
 )
 

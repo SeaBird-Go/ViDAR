@@ -74,6 +74,7 @@ queue_length = 5 # each sequence contains `queue_length` frames.
 expansion = 8
 model = dict(
     type='ViDARXWorldWithFlow',
+    use_grid_sample=True,
     num_classes=12,
     pred_abs_flow=True,
     history_len=queue_length + 1,
