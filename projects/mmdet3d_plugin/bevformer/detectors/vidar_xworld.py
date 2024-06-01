@@ -22,6 +22,8 @@ import copy
 import numpy as np
 import torch.nn.functional as F
 from einops import rearrange
+from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
+from nuscenes.utils.geometry_utils import transform_matrix
 from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
 from projects.mmdet3d_plugin.bevformer.dense_heads.mimo_modules import preprocess
 from .bevformer import BEVFormer
@@ -86,6 +88,7 @@ class ViDARXWorld(BEVFormer):
                  load_pred_occ=False,
                  pred_occ_is_binary=None,
                  use_grid_sample=True,
+                 use_autoreg_test=False,
 
                  *args,
                  **kwargs,):
@@ -113,6 +116,7 @@ class ViDARXWorld(BEVFormer):
         self.load_pred_occ = load_pred_occ
         self.pred_occ_is_binary = pred_occ_is_binary
         self.use_binary_occ = True if num_classes == 2 else False
+        self.use_autoreg_test = use_autoreg_test
         
         out_dim = 32
         self.predicter = nn.Sequential(
@@ -873,6 +877,13 @@ class ViDARXWorldWithFlow(ViDARXWorld):
                      gt_points=None, 
                      input_occs=None,
                      **kwargs):
+        if self.use_autoreg_test:
+            return self.forward_test_autoreg(img_metas, 
+                                             img, 
+                                             gt_points, 
+                                             input_occs, 
+                                             **kwargs)
+        
         num_frames = self.history_len
 
         self.eval()
@@ -993,6 +1004,174 @@ class ViDARXWorldWithFlow(ViDARXWorld):
         if self._viz_pcd_flag:
             print('==== Visualize predicted point clouds done!! End the program. ====')
             print(f'==== The visualized point clouds are stored at {out_path} ====')
+        return [ret_dict]
+    
+    def forward_test_autoreg(self, 
+                             img_metas, 
+                             img=None,
+                             gt_points=None, 
+                             input_occs=None,
+                             **kwargs):
+        def pad_to_6x4x4(input):
+            N = input.shape[0]
+            if N < 6:
+                num_to_pad = 6 - N
+                pad_array = np.expand_dims(input[-1, :, :], axis=0)
+                pad_array = np.repeat(pad_array, num_to_pad, axis=0)
+                padded_array = np.concatenate((input, pad_array), axis=0)
+                return padded_array
+            else:
+                return input
+    
+        def get_curr_ego_to_future_ego_trans(future_metas, curr_idx):
+            ref_meta = future_metas[curr_idx]
+            ref_e2g_translation = ref_meta['ego2global_translation']
+            ref_e2g_rotation = ref_meta['ego2global_rotation']
+            ref_e2g_transform = transform_matrix(
+                ref_e2g_translation, Quaternion(ref_e2g_rotation), inverse=False)
+            
+            future_global2ego = []
+            for i in range(curr_idx + 1, len(future_metas)):
+                future_meta = future_metas[i]
+
+                curr_e2g_translation = future_meta['ego2global_translation']
+                curr_e2g_rotation = future_meta['ego2global_rotation']
+                curr_g2e_transform = transform_matrix(
+                    curr_e2g_translation, Quaternion(curr_e2g_rotation), inverse=True)
+                future_global2ego.append(curr_g2e_transform)
+            future_global2ego = np.asarray(future_global2ego)
+
+            curr_ego_to_future_ego = future_global2ego @ ref_e2g_transform[None] # (N, 4, 4)
+            curr_ego_to_future_ego = pad_to_6x4x4(curr_ego_to_future_ego)
+            return curr_ego_to_future_ego
+
+        self.eval()
+
+        assert 'target_occs' in kwargs, 'The target occupancy map is required for auto-regressive testing.'
+        assert 'future_img_metas' in kwargs, 'The future image metas are required for auto-regressive testing.'
+        assert self.pred_abs_flow, 'Only support absolute flow prediction for now.'
+
+        num_frames = self.history_len
+
+        future_img_metas = kwargs['future_img_metas'][0]
+        target_occs = kwargs['target_occs']
+
+        batched_input_occs = self.get_occ_inputs(input_occs)
+        target_occs = self.get_occ_inputs(target_occs) # to (bs, F, 200, 200, 16)
+
+        metas = [each[num_frames-1] for each in img_metas]
+        curr_ego_to_future_ego_list = []
+        for meta in metas:
+            curr_ego_to_future_ego = torch.from_numpy(meta['curr_ego_to_future_ego'])
+            curr_ego_to_future_ego_list.append(curr_ego_to_future_ego.to(torch.float32))
+
+        origin_ego_to_future_ego_trans = torch.stack(curr_ego_to_future_ego_list, dim=0)  # (bs, num_pred, 4, 4)
+
+        # from list to batched tensor
+        img_metas_input = [each[num_frames - 1] for each in img_metas]
+        
+        valid_frames = list(range(self.test_future_frame_num))
+        ## Start the auto-regressive prediction
+        pred_pcds_final = []
+        gt_pcds_final = []
+        scene_origin_final = []
+        for i in range(6):
+            # Preprocess the historical occupancy
+            x = self.preprocess(batched_input_occs)
+
+            # forecasting the future occupancy (bev actually) flow
+            bev_flow_pred, input_feats = self.future_pred_head.forward_head(
+                x, return_encoder_feat=True, **kwargs)
+            bev_flow_pred = self.predict_bev_flow(bev_flow_pred)
+
+            ## warp the current occupancy map using the predicted flow
+            curr_bev_feat = self.extract_curr_bev_feat(input_feats)
+
+            if i == 0:
+                curr_ego_to_future_ego_trans = origin_ego_to_future_ego_trans.to(x.device)
+            else:
+                curr_ego_to_future_ego_trans = get_curr_ego_to_future_ego_trans(
+                    future_img_metas, i-1
+                )
+                curr_ego_to_future_ego_trans = torch.from_numpy(curr_ego_to_future_ego_trans).to(x.device)[None]
+            
+            warped_predicted_occ = warp_bev_features(
+                curr_bev_feat, 
+                bev_flow_pred, 
+                voxel_size=torch.Tensor([51.2 * 2 / 200.0, 51.2 * 2 / 200.0]), 
+                occ_size=torch.Tensor([200.0, 200.0]),
+                curr_ego_to_future_ego=curr_ego_to_future_ego_trans.to(torch.float32))
+            
+            refined_occ = self.refine_decoder(warped_predicted_occ)
+
+            next_bev_preds = self.post_process2(refined_occ)  # (bs, F, X, Y, Z, c)
+            next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> b f c y x z')
+            next_bev_preds = rearrange(next_bev_preds, 'b f c y x z -> (b f) c () () (y x) z')
+
+            pred_dict = {
+                'next_bev_preds': next_bev_preds,
+                'valid_frames': valid_frames,
+            }
+
+            # decode results and compute some statistic results if needed.
+            start_idx = 0
+            decode_dict = self.future_pred_head.get_point_cloud_prediction(
+                pred_dict, gt_points, start_idx,
+                tgt_bev_h=self.bev_h, tgt_bev_w=self.bev_w,
+                tgt_pc_range=self.point_cloud_range, img_metas=img_metas_input)
+            
+            # convert decode_dict to quantitative statistics.
+            pred_pcds = decode_dict['pred_pcds']
+            gt_pcds = decode_dict['gt_pcds']
+            scene_origin = decode_dict['origin']
+
+            pred_pcds_final.append(pred_pcds[0][0])
+            gt_pcds_final.append(gt_pcds[0][0])
+            scene_origin_final.append(scene_origin[0, 0])
+
+            # combine the next occupancy
+            batched_input_occs = torch.concat([batched_input_occs[:, 1:], target_occs[:, i:i+1]], dim=1)
+
+            # delete the first one of valid_frames
+            gt_points[0][:, -1] -= 1
+        
+        ## merge the results
+        pred_pcds = [pred_pcds_final]
+        gt_pcds = [gt_pcds_final]
+        scene_origin = torch.stack(scene_origin_final)[None]
+        
+        ## ============== Start evaluation =================
+        pred_frame_num = len(pred_pcds[0])
+        ret_dict = dict()
+        for frame_idx in range(pred_frame_num):
+            count = 0
+            frame_name = frame_idx + start_idx
+            ret_dict[f'frame.{frame_name}'] = dict(
+                count=0,
+                chamfer_distance=0,
+                l1_error=0,
+                absrel_error=0,
+            )
+            for bs in range(len(pred_pcds)):
+                pred_pcd = pred_pcds[bs][frame_idx]
+                gt_pcd = gt_pcds[bs][frame_idx]
+
+                ret_dict[f'frame.{frame_name}']['chamfer_distance'] += (
+                    e2e_predictor_utils.compute_chamfer_distance_inner(
+                        pred_pcd, gt_pcd, self.point_cloud_range).item())
+
+                l1_error, absrel_error = eval_utils.compute_ray_errors(
+                    pred_pcd.cpu().numpy(), gt_pcd.cpu().numpy(),
+                    scene_origin[bs, frame_idx].cpu().numpy(), scene_origin.device)
+                ret_dict[f'frame.{frame_name}']['l1_error'] += l1_error
+                ret_dict[f'frame.{frame_name}']['absrel_error'] += absrel_error
+
+                if self._submission:
+                    self._save_prediction(pred_pcd, img_metas[bs], frame_idx + 1)
+
+                count += 1
+            ret_dict[f'frame.{frame_name}']['count'] = count
+
         return [ret_dict]
     
 
