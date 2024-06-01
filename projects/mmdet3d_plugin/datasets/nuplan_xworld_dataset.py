@@ -28,11 +28,13 @@ class NuPlanXWorldDataset(NuPlanViDARDatasetV1):
     def __init__(self,
                  use_img=True,
                  use_future_occ_gts=False,
+                 need_future_metas=False,
                  *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.use_img = use_img
         self.use_future_occ_gts = use_future_occ_gts
+        self.need_future_metas = need_future_metas
 
     def union2one(self, previous_queue, future_queue):
         # 1. get transformation from all frames to current (reference) frame
@@ -218,6 +220,13 @@ class NuPlanXWorldDataset(NuPlanViDARDatasetV1):
         ret_queue['gt_points'] = DC(
             torch.from_numpy(np.concatenate(total_pts_list, 0)), cpu_only=False)
         
+        if self.need_future_metas:
+            # for occupancy forecasting save path
+            future_metas_map = {}
+            for i, each in enumerate(future_queue[1:]):
+                future_metas_map[i] = each['img_metas'].data
+            ret_queue['future_img_metas'] = DC(future_metas_map, cpu_only=True)
+        
         if self.use_occ_gts:
             # only load the occupancy in future queue.
             if 'occ_gts' in future_queue[-1]:
@@ -238,11 +247,16 @@ class NuPlanXWorldDataset(NuPlanViDARDatasetV1):
                                              cpu_only=False,
                                              stack=True)
 
-            if self.use_future_occ_gts:
-                assert 'occ_gts' in future_queue[-1]
-
-                occ_gt_list = [each['occ_gts'] for each in future_queue[1:]] 
-                ret_queue['target_occs'] = DC(occ_gt_list, cpu_only=False)
+            if self.use_future_occ_gts:  # load the future target occupancy
+                if 'occ_gts' in future_queue[-1]:
+                    occ_gt_list = [each['occ_gts'] for each in future_queue[1:]] 
+                    ret_queue['target_occs'] = DC(occ_gt_list, cpu_only=False)
+                
+                if 'occ_preds' in future_queue[-1]:
+                    occ_gt_list = [each['occ_preds'] for each in future_queue[1:]] 
+                    ret_queue['target_occs'] = DC(torch.stack(occ_gt_list), 
+                                                  cpu_only=False,
+                                                  stack=True)
 
         if len(future_can_bus) < 1 + self.future_length:
             return None

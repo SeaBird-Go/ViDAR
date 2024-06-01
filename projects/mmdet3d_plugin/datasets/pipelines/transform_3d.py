@@ -253,7 +253,7 @@ class CustomCollect3D(object):
                             'can_bus',
                             'ego2global_translation', 'ego2global_rotation',
                             'lidar2ego_translation', 'lidar2ego_rotation',
-                            'lidar2global_rotation',
+                            'lidar2global_rotation', 'occ_gt_path'
                             )):
         self.keys = keys
         self.meta_keys = meta_keys

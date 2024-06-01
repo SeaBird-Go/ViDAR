@@ -13,6 +13,7 @@ Description: The XWorld occupancy world model.
 
 import mmcv
 import os
+import os.path as osp
 import torch
 from torch import nn
 from mmcv.runner import force_fp32, auto_fp16
@@ -367,7 +368,7 @@ class ViDARXWorld(BEVFormer):
         losses.update(loss_dict)
         return losses
 
-    def forward_test(self, 
+    def forward_test_old(self, 
                      img_metas, 
                      img=None,
                      gt_points=None, 
@@ -463,6 +464,136 @@ class ViDARXWorld(BEVFormer):
             print(f'==== The visualized point clouds are stored at {out_path} ====')
         return [ret_dict]
 
+    def forward_test(self, 
+                     img_metas, 
+                     img=None,
+                     gt_points=None, 
+                     input_occs=None,
+                     target_occs=None,
+                     **kwargs):
+        """Predict the future in an auto-regressive manner.
+
+        Args:
+            img_metas (_type_): _description_
+            img (_type_, optional): _description_. Defaults to None.
+            gt_points (_type_, optional): _description_. Defaults to None.
+            input_occs (_type_, optional): _description_. Defaults to None.
+            target_occs (_type_, optional): _description_. Defaults to None.
+
+        Raises:
+            ValueError: _description_
+
+        Returns:
+            _type_: _description_
+        """
+        num_frames = self.history_len
+
+        self.eval()
+
+        batched_input_occs = self.get_occ_inputs(input_occs) # to (bs, F, 200, 200, 16)
+        target_occs = self.get_occ_inputs(target_occs) # to (bs, F, 200, 200, 16)
+
+        img_metas = [each[num_frames - 1] for each in img_metas]
+
+        # 3. predict future BEV.
+        valid_frames = list(range(self.test_future_frame_num))
+
+        pred_pcds_final = []
+        gt_pcds_final = []
+        scene_origin_final = []
+        for i in range(6):
+            # Preprocess the historical occupancy
+            x = self.preprocess(batched_input_occs)
+            
+            # forecasting the future occupancy
+            next_bev_preds = self.future_pred_head.forward_head(x)
+            next_bev_preds = self.post_process(next_bev_preds)  # (bs, F, X, Y, Z, c)
+            next_bev_preds = rearrange(next_bev_preds, 'b f x y z c -> b f c y x z')
+            next_bev_preds = rearrange(next_bev_preds, 'b f c y x z -> (b f) c () () (y x) z')
+
+            pred_dict = {
+                'next_bev_preds': next_bev_preds,
+                'valid_frames': valid_frames,
+            }
+
+            # decode results
+            start_idx = 0
+            decode_dict = self.future_pred_head.get_point_cloud_prediction(
+                pred_dict, gt_points, start_idx,
+                tgt_bev_h=self.bev_h, tgt_bev_w=self.bev_w,
+                tgt_pc_range=self.point_cloud_range, img_metas=img_metas)
+
+            # convert decode_dict to quantitative statistics.
+            pred_pcds = decode_dict['pred_pcds']
+            gt_pcds = decode_dict['gt_pcds']
+            scene_origin = decode_dict['origin']
+
+            pred_pcds_final.append(pred_pcds[0][0])
+            gt_pcds_final.append(gt_pcds[0][0])
+            scene_origin_final.append(scene_origin[0, 0])
+
+            # combine the next occupancy
+            batched_input_occs = torch.concat([batched_input_occs[:, 1:], target_occs[:, i:i+1]], dim=1)
+
+            # delete the first one of valid_frames
+            gt_points[0][:, -1] -= 1
+
+        ## merge the results
+        pred_pcds = [pred_pcds_final]
+        gt_pcds = [gt_pcds_final]
+        scene_origin = torch.stack(scene_origin_final)[None]
+
+        pred_frame_num = len(pred_pcds[0])
+        ret_dict = dict()
+        for frame_idx in range(pred_frame_num):
+            count = 0
+            frame_name = frame_idx + start_idx
+            ret_dict[f'frame.{frame_name}'] = dict(
+                count=0,
+                chamfer_distance=0,
+                l1_error=0,
+                absrel_error=0,
+            )
+            for bs in range(len(pred_pcds)):
+                pred_pcd = pred_pcds[bs][frame_idx]
+                gt_pcd = gt_pcds[bs][frame_idx]
+
+                ret_dict[f'frame.{frame_name}']['chamfer_distance'] += (
+                    e2e_predictor_utils.compute_chamfer_distance_inner(
+                        pred_pcd, gt_pcd, self.point_cloud_range).item())
+
+                l1_error, absrel_error = eval_utils.compute_ray_errors(
+                    pred_pcd.cpu().numpy(), gt_pcd.cpu().numpy(),
+                    scene_origin[bs, frame_idx].cpu().numpy(), scene_origin.device)
+                ret_dict[f'frame.{frame_name}']['l1_error'] += l1_error
+                ret_dict[f'frame.{frame_name}']['absrel_error'] += absrel_error
+
+                if self._viz_pcd_flag:
+                    cur_name = img_metas[bs]['sample_idx']
+                    out_path = f'{self._viz_pcd_path}_{cur_name}_{frame_name}.png'
+                    gt_inside_mask = e2e_predictor_utils.get_inside_mask(gt_pcd, self.point_cloud_range)
+                    gt_pcd_inside = gt_pcd[gt_inside_mask]
+                    pred_pcd_inside = pred_pcd[gt_inside_mask]
+                    root_path = '/'.join(out_path.split('/')[:-1])
+                    mmcv.mkdir_or_exist(root_path)
+                    self._viz_pcd(
+                        pred_pcd_inside.cpu().numpy(),
+                        scene_origin[bs, frame_idx].cpu().numpy()[None, :],
+                        output_path=out_path,
+                        gt_pcd=gt_pcd_inside.cpu().numpy()
+                    )
+
+                if self._submission:
+                    self._save_prediction(pred_pcd, img_metas[bs], frame_idx + 1)
+
+                count += 1
+            ret_dict[f'frame.{frame_name}']['count'] = count
+
+        if self._viz_pcd_flag:
+            print('==== Visualize predicted point clouds done!! End the program. ====')
+            print(f'==== The visualized point clouds are stored at {out_path} ====')
+        return [ret_dict]
+    
     def _save_prediction(self, pred_pcd, img_meta, frame_idx):
         """ Save prediction.
 
@@ -874,6 +1005,8 @@ class XWorldOccWithFlow(ViDARXWorldWithFlow):
         ViDARXWorldWithFlow (_type_): _description_
     """
     def __init__(self,
+                 save_target_occs=False,
+                 save_pred_dir=None,
                  **kwargs):
         super().__init__(**kwargs)
 
@@ -888,6 +1021,9 @@ class XWorldOccWithFlow(ViDARXWorldWithFlow):
             nn.Softplus(),
             nn.Linear(out_dim*2, self.num_classes),
         )
+
+        self.save_target_occs = save_target_occs
+        self.save_pred_dir = save_pred_dir
 
     @auto_fp16(apply_to=('img', 'points'))
     def forward_train(self,
@@ -971,5 +1107,102 @@ class XWorldOccWithFlow(ViDARXWorldWithFlow):
         lovasz_loss = lovasz_softmax(pred_occ, target_occ)
         loss_dict[f'{suffix}lovasz_loss'] = lovasz_loss
         return loss_dict
+
+    def forward_test(self,
+                     input_occs=None,
+                     img_metas=None,
+                     img=None,
+                     target_occs=None,
+                     **kwargs,
+                     ):
+        num_frames = self.history_len
+
+        self.eval()
+
+        batched_input_occs = self.get_occ_inputs(input_occs)
+
+        # Preprocess the historical occupancy
+        x = self.preprocess(batched_input_occs)
+
+        # forecasting the future occupancy
+        bev_flow_pred, input_feats = self.future_pred_head.forward_head(
+            x, return_encoder_feat=True, **kwargs)
+        bev_flow_pred = self.predict_bev_flow(bev_flow_pred)
+
+        ## warp the current occupancy map using the predicted flow
+        # bev_flow_pred = rearrange(bev_flow_pred, 'b f h w dim2 -> (b f) h w dim2')
+        curr_bev_feat = self.extract_curr_bev_feat(input_feats)
+
+        curr_ego_to_future_ego_trans = None
+        if self.pred_abs_flow:
+            metas = [each[num_frames-1] for each in img_metas]
+
+            curr_ego_to_future_ego_list = []
+            for meta in metas:
+                curr_ego_to_future_ego = torch.from_numpy(meta['curr_ego_to_future_ego']).to(x.device)
+                curr_ego_to_future_ego_list.append(curr_ego_to_future_ego.to(torch.float32))
+
+            curr_ego_to_future_ego_trans = torch.stack(curr_ego_to_future_ego_list, dim=0)  # (bs, num_pred, 4, 4)
+        
+        if self.pred_abs_flow:
+            warped_predicted_occ = warp_bev_features(
+                curr_bev_feat, 
+                bev_flow_pred, 
+                voxel_size=torch.Tensor([50.0 * 2 / 200.0, 50.0 * 2 / 200.0]), 
+                occ_size=torch.Tensor([200.0, 200.0]),
+                curr_ego_to_future_ego=curr_ego_to_future_ego_trans)
+        else:
+            raise ValueError('Only support absolute flow prediction for now.')
+        
+        refined_occ = self.refine_decoder(warped_predicted_occ)
+        refined_logits = self.post_process2(refined_occ) # (bs, F, X, Y, Z, c)
+
+        # save results to be (bs, F, X, Y, Z)
+        pred_pcds = refined_logits.argmax(dim=-1).detach().cpu().numpy()
+
+        img_metas = [each[num_frames - 1] for each in img_metas]
+
+        # save the results
+
+        if self.save_target_occs:
+            target_occs = self.get_batched_inputs(target_occs).cpu().numpy()
+        
+        future_img_metas = kwargs['future_img_metas']
+        pred_frame_num = len(pred_pcds[0])
+        for frame_idx in range(pred_frame_num):
+            for bs in range(len(pred_pcds)):
+                pred_pcd = pred_pcds[bs][frame_idx]
+
+                if self.save_target_occs:
+                    target_occ = target_occs[bs][frame_idx]
+                    self.save_occ_results("./results/occupancy_val_gt",
+                                          target_occ, img_metas[bs], frame_idx)
+                
+                future_meta = future_img_metas[bs][frame_idx]
+                self.save_occ_results(self.save_pred_dir,
+                                      pred_pcd, future_meta, frame_idx,
+                                      use_occ_path=True)
+        return [pred_pcds]
+    
+    def save_occ_results(self, 
+                         save_dir, 
+                         pred_pcd, 
+                         img_meta, 
+                         frame_idx,
+                         use_occ_path=False):
+        if use_occ_path:
+            occ_gt_path = img_meta['occ_gt_path']
+            save_path = occ_gt_path.replace('dataset/openscene-v1.0', save_dir)
+            save_path = save_path.replace('data/openscene-v1.0', save_dir)
+            save_dir = osp.split(save_path)[0]
+            mmcv.mkdir_or_exist(save_dir)
+        else:
+            base_name = img_meta['sample_idx']
+            base_name = f'{base_name}_{frame_idx}'
+            mmcv.mkdir_or_exist(save_dir)
+            save_path = os.path.join(save_dir, base_name)
+
+        np.savez_compressed(save_path, pred_pcd.astype(np.uint8))
+
 
 

@@ -74,6 +74,7 @@ queue_length = 5 # each sequence contains `queue_length` frames.
 expansion = 8
 model = dict(
     type='XWorldOccWithFlow',
+    save_pred_dir='results/xworld_occ_w_flow_trainval_val_e20',
     use_grid_sample=True,
     num_classes=12,
     pred_abs_flow=True,
@@ -260,6 +261,8 @@ data = dict(
               classes=class_names, modality=input_modality,
               use_img=False,
               use_occ_gts=True,
+              use_future_occ_gts=True,
+              need_future_metas=True,
               # some evaluation configuration.
               queue_length=queue_length,
               future_length=future_queue_length_test,
